@@ -1,0 +1,201 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="thirdparty">
+      <UniqueIdentifier>{4fd15e0b-237a-4844-922e-0f9b86aa0268}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="thirdparty\zlib">
+      <UniqueIdentifier>{10abc7cf-a0f1-4650-a008-ac4636267f65}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\engineinit.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\adler32.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\compress.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\crc32.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\deflate.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\gzio.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\infback.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\inffast.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\inflate.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\inftrees.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\trees.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\uncompr.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\zlib\zutil.c">
+      <Filter>thirdparty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\mem.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Logger\Log.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\string\engstring.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="util\mathf.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="file\packfile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framework\template\CTemplateMgr.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framework\template\CTemplate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dictionary\CEmbeddedResFile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="resfileparser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\platform_pc\WindowsWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\platform_pc\hw.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="util\x2tHelper.h">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\platform_pc\dlvtx.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\Font.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\bg\bg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="engine\scene\scene.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framework\object\CBaseObject.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dictionary\CEngineSerialiseStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="engine\engineinit.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\mem.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Logger\Log.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\string\engstring.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util\mathf.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="file\packfile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util\unorgtypes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util\powerpc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framework\template\CTemplateMgr.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framework\template\CTemplate.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dictionary\CEmbeddedResFile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="YYToken.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\platform_pc\WindowsWindow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\platform_pc\hw.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\platform_pc\dlvtx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\Font.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\bg\bg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="engine\scene\scene.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Data\bf\settings_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Data\common\constants\f_constants_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Data\common\constants\constants_ai_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Data\common\constants\constants_health_and_damage_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Data\bf\constants\bf_constants_ai_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Data\bf\constants\bf_constants_res.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framework\object\CBaseObject.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dictionary\CEngineSerialiseStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
