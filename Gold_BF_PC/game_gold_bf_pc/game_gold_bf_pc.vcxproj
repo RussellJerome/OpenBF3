@@ -138,6 +138,8 @@
     <ClCompile Include="file\packfile.cpp" />
     <ClCompile Include="framework\component\CComponent.cpp" />
     <ClCompile Include="framework\logo\CLogo.cpp" />
+    <ClCompile Include="framework\network\FRDPeer.cpp" />
+    <ClCompile Include="framework\network\FRDSockets.cpp" />
     <ClCompile Include="framework\object\CBaseObject.cpp" />
     <ClCompile Include="framework\object\CObjectAllocator.cpp" />
     <ClCompile Include="framework\template\CTemplate.cpp" />
@@ -181,6 +183,8 @@
     <ClInclude Include="file\packfile.h" />
     <ClInclude Include="framework\component\CComponent.h" />
     <ClInclude Include="framework\logo\CLogo.h" />
+    <ClInclude Include="framework\network\FRDPeer.h" />
+    <ClInclude Include="framework\network\FRDSockets.h" />
     <ClInclude Include="framework\object\CBaseObject.h" />
     <ClInclude Include="framework\object\CObjectAllocator.h" />
     <ClInclude Include="framework\template\CTemplate.h" />

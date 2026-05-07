@@ -154,6 +154,26 @@ struct queueState_s
     unsigned __int8* items;
 };
 
+struct poolObjArray_s
+{
+    void* array;
+    poolObjArray_s* prev;
+};
+
+struct poolStateAE_s
+{
+    poolState state;
+    int heap;
+    poolObjArray_s* addObjArrays;
+    unsigned int extendCount;
+};
+
+template<typename T>
+struct CAutoExtendingPool
+{
+    poolStateAE_s m_poolae;
+};
+
 struct listState_s;
 
 void* memAllocAlignCore(unsigned int length, unsigned int mgh, int align,
