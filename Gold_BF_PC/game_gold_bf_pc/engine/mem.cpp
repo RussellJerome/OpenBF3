@@ -19,7 +19,7 @@ mtx_u testMtx;
 HANDLE* g_memMutexHandles;
 memSettings_s memorySettingsG5 = { 45088768, 17825792, 0, 2306867, 1600, 15000, 24000, 76, 64, 44, 64 };
 memSettings_s memorySettingsBF = { 32505856, 20971520, 1048576, 1258291, 1800, 10000, 10000, 76, 64, 44, 64 };
-
+int g_heapGame;
 void* debugAlloc(int length, int inAlignment)
 {
     DbgPrint("debugAlloc");
@@ -991,4 +991,20 @@ void listInitFromHeap(listState_s* list, unsigned int heap, unsigned int itemCou
     list->items = v9;
     list->flags = 1;
     list->count = 0;
+}
+
+void* poolFreePool(poolState* pool)
+{
+    void* objects = pool->objects;
+
+    // If the owned-memory flag is set (bit 28 of objectSize) and objects ptr is valid, free it
+    if ((pool->objectSize & 0x10000000) != 0 && objects)
+    {
+        memFreeFlags((char*)objects, 1);
+        objects = nullptr;
+    }
+
+    memset(pool, 0, 0x14);
+
+    return objects;
 }

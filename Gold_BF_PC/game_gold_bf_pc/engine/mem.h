@@ -188,10 +188,11 @@ extern ConditionSlot s_conditionSlots[32];
 extern memSettings_s memorySettingsG5;
 extern memSettings_s memorySettingsBF;
 extern int s_memAllocsThisFrame;
-
+extern int g_heapGame;
 void stackInit(stackheader_s* s, unsigned int numentries, unsigned int entrysize);
 void queueInit(queueState_s* q, unsigned int itemCount, unsigned int itemSize);
 void poolInitFromHeap(poolState* pool, unsigned int heap, unsigned int objectSize, unsigned int objectArrayLength);
 void listInitFromHeap(listState_s* list, unsigned int heap, unsigned int itemCount, unsigned int itemSize);
 
 int memAllocGroupRandomBlockSizeEx(const char* inName, int groupmemsize, unsigned __int8 allocLow);
+void* poolFreePool(poolState* pool);
