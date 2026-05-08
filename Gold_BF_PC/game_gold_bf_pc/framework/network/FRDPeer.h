@@ -183,6 +183,28 @@ public:
 		unsigned int packetSizesSend[8];
 		unsigned int packetSizesRecv[8];
 	};
+
+	FRDNetPeer();
+	void FreeUnreliablePackets(int numkeep);
+	void InitialiseConnection(Connection* connection);
+	void CopyConnection(Connection* to, Connection* from);
+	int GetFreeConnection();
+	void KillConnection(Connection* connection);
+	Connection* GetConnectionFromPrivateID(AddressID* id);
+	Connection* GetConnectionFromPublicID(AddressID* id);
+	Connection* GetConnectionFromPublicID(ConnectionID* id);
+	void ProcessNetworkPacket(unsigned int binaryAddress, unsigned __int16 port, char* data, unsigned int length, PacketHeader* header, unsigned __int8* pdata, int packetsize);
+	bool Initialize(
+		int            peerid,
+		unsigned int   maxNumPeers,
+		unsigned short localPort,
+		bool           isServer,
+		bool           isDedicated,
+		bool           allowServerMigration,
+		bool           online);
+
+	void Deinitialize();
+
 	int m_peerID;
 	int m_maxNumPeers;
 	unsigned int m_recvQueue;
@@ -212,6 +234,13 @@ public:
 		int maxNumReliableAllocated;
 	};
 
+	void FreePacketPoolItem(PacketPoolItem* item);
+	bool AddPeer(FRDNetPeer* peer, int id, unsigned short localPort, bool online);
+	void ProcessNetworkPacket(
+		unsigned int binaryAddress,
+		unsigned short port,
+		const char* data,
+		int length);
 	bool(__cdecl* m_externalSDKProcessPacketFuncs[2])(unsigned int, unsigned __int16, const char*, int);
 	FRDNetPeer* m_peers[2];
 	FRDSocket m_socket;
@@ -222,4 +251,6 @@ public:
 	int m_maxNum;
 	CAutoExtendingPool<PacketPoolItem> m_packetPool;
 	FRDPeerHandler::PacketSizes m_sizes[2];
+
+	static FRDPeerHandler* s_peerHandler;
 };

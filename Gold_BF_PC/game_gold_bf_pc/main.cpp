@@ -25,6 +25,8 @@
 
 #include "engine/scene/scene.h"
 
+#include "framework/network/FRDPeer.h"
+
 struct HOM;
 
 
@@ -1962,6 +1964,7 @@ void frdmain(int argc, char** argv)
         }
     }
 }
+#define DedicatedServer
 
 int main()
 {
@@ -2000,6 +2003,15 @@ int main()
     //idk and idc atm
     //_set_purecall_handler((void(*)())CFrontendScene::TransparentOverlayGfx);
 
+    initData.graphicsEnable = 1;
+#ifdef DedicatedServer
+    //Dedicated server
+    FRDPeerHandler::s_peerHandler = new FRDPeerHandler();
+    FRDSockets::m_instance = new FRDSockets();
+    auto handle = new FRDNetPeer();
+    handle->Initialize(0, 4, 60004, true, true, true, false);
+    //Default Packet F0 0D 00 00 00 00 00
+#endif // DEBUG
     frdmain(processedArgc, argv);
 
     return 0;

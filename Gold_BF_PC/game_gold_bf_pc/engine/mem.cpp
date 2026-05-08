@@ -1008,3 +1008,106 @@ void* poolFreePool(poolState* pool)
 
     return objects;
 }
+
+//Custom struct
+struct tsQueueEntry
+{
+    int          active;
+    unsigned int maxNumItems;
+    unsigned int itemSize;
+    void* buffer;
+    unsigned int readIdx;
+    unsigned int writeIdx;
+    unsigned int mutex;
+    unsigned int notEmpty;
+    unsigned int notFull;
+};
+
+// Global table
+tsQueueEntry g_tsQueues[16]; // at unk_82D10298
+
+struct conditionEntry
+{
+    int    active;    // +0x00
+    HANDLE event;     // +0x04
+    int    mutexId;   // +0x08
+};
+
+conditionEntry g_conditions[32]; // at dword_82D104F0
+
+unsigned int conditionCreate(int mutexId)
+{
+    // Find free slot
+    int slotIdx = -1;
+    for (int i = 0; i < 32; i++)
+    {
+        if (!g_conditions[i].active)
+        {
+            slotIdx = i;
+            break;
+        }
+    }
+
+    if (slotIdx == -1)
+        return (unsigned int)-1;
+
+    conditionEntry* c = &g_conditions[slotIdx];
+
+    c->mutexId = mutexId;
+    c->event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    c->active = 1;
+
+    return (unsigned int)slotIdx;
+}
+
+unsigned int tsQueueCreate(unsigned int maxNumItems, unsigned int itemSize)
+{
+    // Find a free slot in the global queue table
+    int slotIdx = -1;
+    for (int i = 0; i < 16; i++)  // 0x240 / 0x24 = 16 slots
+    {
+        tsQueueEntry* entry = &g_tsQueues[i];
+        if (!entry->active)
+        {
+            slotIdx = i;
+            break;
+        }
+    }
+
+    if (slotIdx == -1)
+        return (unsigned int)-1;
+
+    tsQueueEntry* q = &g_tsQueues[slotIdx];
+
+    q->maxNumItems = maxNumItems;
+    q->itemSize = itemSize;
+
+    unsigned int totalSize = maxNumItems * itemSize;
+    if (totalSize > 0)
+    {
+        q->buffer = memAllocAlignCore(
+            totalSize, 0, 0,
+            "source/boss/threadSafeQueue.c", 17,
+            nullptr, 1);
+    }
+    else
+    {
+        q->buffer = nullptr;
+    }
+
+    q->readIdx = 0;
+    q->writeIdx = 0;
+    q->mutex = mutexCreate();
+    q->notEmpty = conditionCreate(q->mutex);
+    q->notFull = conditionCreate(q->mutex);
+    q->active = 1;
+
+    return (unsigned int)slotIdx;
+}
+
+//PC Ported
+void taskmanStartThreadExHW(HANDLE thread)
+{
+    SetThreadPriority(thread, THREAD_PRIORITY_NORMAL);
+    ResumeThread(thread);
+}

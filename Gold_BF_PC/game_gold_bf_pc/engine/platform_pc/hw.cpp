@@ -1582,11 +1582,11 @@ void setState(rStateBase* base, int offset, unsigned int numValues)
 int s_topIndex = 0;
 void platformClearColourHW(float r, float g, float b, float a)
 {
-    DbgPrint("g_rState = %p", g_rState);
-    DbgPrint("&s_stack[0] = %p", &s_stack[0]);
-    DbgPrint("s_top = %p", s_top);
-    DbgPrint("s_topIndex = %d", s_topIndex);
-    DbgPrint("platformClearColourHW: r=%.2f g=%.2f b=%.2f a=%.2f", r, g, b, a);
+    //DbgPrint("g_rState = %p", g_rState);
+    //DbgPrint("&s_stack[0] = %p", &s_stack[0]);
+    //DbgPrint("s_top = %p", s_top);
+    //DbgPrint("s_topIndex = %d", s_topIndex);
+    //DbgPrint("platformClearColourHW: r=%.2f g=%.2f b=%.2f a=%.2f", r, g, b, a);
 
     rStateValueStore* v4 = g_rState;
     rStateFloat4* p_clearcolour = &g_rState->clearcolour;

@@ -1,7 +1,4 @@
 #include "FRDSockets.h"
-#include <winsock2.h>
-
-#pragma comment(lib, "Ws2_32.lib")
 
 int FRDSockets::SendTo(FRDSocket* socket, const char* data, int length, unsigned int binaryAddress, unsigned short port)
 {
@@ -104,53 +101,55 @@ BOOL CheckSocketError()
     return TRUE;
 }
 
+/*
+The devil went down to Georgia, he was lookin' for a soul to steal
+He was in a bind 'cause he was way behind
+And he was willin' to make a deal
+When he came across this young man sawin' on a fiddle and playin' it hot
+And the devil jumped up on a hickory stump
+And said, "boy, let me tell you what"
+"I guess you didn't know it but I'm a fiddle player too
+And if you'd care to take a dare, I'll make a bet with you
+Now you play pretty good fiddle, boy
+But give the devil his due
+I'll bet a fiddle of gold against your soul
+'Cause I think I'm better than you"
+*/
+
 void FRDSockets::CreateBoundSocket(FRDSocket* sock, unsigned short port, bool online)
 {
-    // Store protocol type -- online uses a different protocol
-    sock->s = online ? 1 : 0;
+    sock->protocol = (FRDSocket::Protocol)(online ? 1 : 0);
 
-    // Create UDP socket -- offline uses UDP (17), online uses different protocol (0xFE)
-    int protocol = online ? 0xFE : IPPROTO_UDP;
-    SOCKET s = socket(AF_INET, SOCK_DGRAM, protocol);
+    // On PC always use standard UDP -- 0xFE is Xbox 360 VDP only
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sock->s = (int)s;
 
     if (s == INVALID_SOCKET)
     {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSAECONNRESET)
-            goto fail;
-        goto fail;
+        sock->s = -1;
+        return;
     }
 
     // Set SO_REUSEADDR
     {
         int optval = 1;
         if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR)
-        {
-            CheckSocketError();
             goto fail;
-        }
     }
 
-    // Set non-blocking mode (FIONBIO)
+    // Set non-blocking mode
     {
         u_long nonblocking = 1;
         if (ioctlsocket(s, FIONBIO, &nonblocking) == SOCKET_ERROR)
-        {
-            CheckSocketError();
             goto fail;
-        }
     }
 
-    // Set SO_BROADCAST for offline (LAN) sockets
+    // SO_BROADCAST for LAN
     if (!online)
     {
         int optval = 1;
         if (setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&optval, sizeof(optval)) == SOCKET_ERROR)
-        {
-            CheckSocketError();
             goto fail;
-        }
     }
 
     // Bind to port
@@ -158,18 +157,21 @@ void FRDSockets::CreateBoundSocket(FRDSocket* sock, unsigned short port, bool on
         sockaddr_in addr;
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_port = port;
+        addr.sin_port = htons(port);  // also fix -- port needs htons()
         addr.sin_addr.s_addr = INADDR_ANY;
 
         if (bind(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR)
-        {
-            CheckSocketError();
             goto fail;
-        }
     }
 
     return;
 
 fail:
+    closesocket(s);
     sock->s = -1;
 }
+
+bool FRDSockets::m_started = false;
+FRDSockets* FRDSockets::m_instance = nullptr;
+
+WSAData FRDSockets::m_winsockinfo = { 0u, 0u, "", "", 0u, 0u, NULL }; // idb
