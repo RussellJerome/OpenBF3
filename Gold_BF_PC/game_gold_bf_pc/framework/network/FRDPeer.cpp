@@ -1,5 +1,8 @@
 #include "FRDPeer.h"
 #include "logger/Log.h"
+#include <cstdio>
+#include <direct.h>
+#define DumpPacket
 
 FRDNetPeer::FRDNetPeer()
 {
@@ -467,11 +470,35 @@ void FRDPeerHandler::ProcessNetworkPacket(
     const char* data,
     int length)
 {
+#ifdef DumpPacket
+    // Dump every raw packet received
+    {
+        static int packetDumpIndex = 0;
+
+        _mkdir("packet_dumps");
+
+        char filename[256];
+        sprintf_s(
+            filename,
+            sizeof(filename),
+            "packet_dumps/packet_%06d.bin",
+            packetDumpIndex++
+        );
+
+        FILE* f = nullptr;
+        if (fopen_s(&f, filename, "wb") == 0 && f)
+        {
+            fwrite(data, 1, length, f);
+            fclose(f);
+        }
+    }
+
+#endif // DumpPacket
+
     PacketHeader header;
     memset(&header, 0, sizeof(header));
 
     unsigned char* pdata = nullptr;
-
     // Check external SDK packet handlers first
     for (int i = 0; i < 2; i++)
     {
@@ -483,7 +510,7 @@ void FRDPeerHandler::ProcessNetworkPacket(
     if (m_socket.protocol == FRDSocket::PROTOCOL_VDP)
     {
         // VDP (Xbox Live) packet format
-        unsigned short packetSize = *(unsigned short*)data;
+        unsigned short packetSize = ntohs(*(unsigned short*)data); // big-endian from 360
         unsigned char  peerIdx = (unsigned char)data[2];
 
         if (peerIdx > 1)

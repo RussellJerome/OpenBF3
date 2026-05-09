@@ -118,7 +118,10 @@ I'll bet a fiddle of gold against your soul
 
 void FRDSockets::CreateBoundSocket(FRDSocket* sock, unsigned short port, bool online)
 {
-    sock->protocol = (FRDSocket::Protocol)(online ? 1 : 0);
+    //sock->protocol = (FRDSocket::Protocol)(online ? 1 : 0);
+
+    //Xbox seems to always use the VDP PATH
+    sock->protocol = FRDSocket::PROTOCOL_VDP;
 
     // On PC always use standard UDP -- 0xFE is Xbox 360 VDP only
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
