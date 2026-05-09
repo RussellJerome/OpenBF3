@@ -209,6 +209,8 @@ extern memSettings_s memorySettingsG5;
 extern memSettings_s memorySettingsBF;
 extern int s_memAllocsThisFrame;
 extern int g_heapGame;
+extern _LARGE_INTEGER timerGameStartTime;
+extern _LARGE_INTEGER timerFrequency;
 void stackInit(stackheader_s* s, unsigned int numentries, unsigned int entrysize);
 void queueInit(queueState_s* q, unsigned int itemCount, unsigned int itemSize);
 void poolInitFromHeap(poolState* pool, unsigned int heap, unsigned int objectSize, unsigned int objectArrayLength);
@@ -217,3 +219,7 @@ unsigned int tsQueueCreate(unsigned int maxNumItems, unsigned int itemSize);
 int memAllocGroupRandomBlockSizeEx(const char* inName, int groupmemsize, unsigned __int8 allocLow);
 void* poolFreePool(poolState* pool);
 void taskmanStartThreadExHW(HANDLE thread);
+unsigned __int8 tsQueueAdd(unsigned int queueId, void* inItem,
+    unsigned __int8 blocking);
+void conditionWait(unsigned int conditionId);
+double timerGetImmediateTime();

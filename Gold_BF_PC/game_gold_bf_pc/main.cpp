@@ -50,8 +50,7 @@ WorldStateData WorldState = {};
 const char* g_buildStuff = nullptr;
 const char* g_buildStuffForDisplay = nullptr;
 
-_LARGE_INTEGER timerGameStartTime = { { 0, 0u } };
-_LARGE_INTEGER timerFrequency = { { 0, 0u } };
+
 void timerTick(bool paused);
 int bossInitialise()
 {
@@ -1201,16 +1200,6 @@ void engineInitialise(EngineInitData* data)
     worldData.numprops = 1500;
     engineframe = 0;
 }
-
-double timerGetImmediateTime()
-{
-    LARGE_INTEGER counter;
-    QueryPerformanceCounter(&counter);
-
-    __int64 elapsed = counter.QuadPart - timerGameStartTime.QuadPart;
-    return (double)elapsed / (double)timerFrequency.QuadPart;
-}
-
 void timerSleep(float t)
 {
     if (!_isnan(t) && _finite(t))

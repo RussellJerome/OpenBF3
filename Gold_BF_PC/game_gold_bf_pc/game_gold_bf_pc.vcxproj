@@ -139,6 +139,7 @@
     <ClCompile Include="file\packfile.cpp" />
     <ClCompile Include="framework\component\CComponent.cpp" />
     <ClCompile Include="framework\logo\CLogo.cpp" />
+    <ClCompile Include="framework\network\EngineNetDataStream.cpp" />
     <ClCompile Include="framework\network\FRDPeer.cpp" />
     <ClCompile Include="framework\network\FRDSockets.cpp" />
     <ClCompile Include="framework\object\CBaseObject.cpp" />
@@ -184,6 +185,7 @@
     <ClInclude Include="file\packfile.h" />
     <ClInclude Include="framework\component\CComponent.h" />
     <ClInclude Include="framework\logo\CLogo.h" />
+    <ClInclude Include="framework\network\EngineNetDataStream.h" />
     <ClInclude Include="framework\network\FRDPeer.h" />
     <ClInclude Include="framework\network\FRDSockets.h" />
     <ClInclude Include="framework\object\CBaseObject.h" />

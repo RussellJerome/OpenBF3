@@ -45,7 +45,7 @@ unsigned int  s_threadJobQueue = (unsigned int)-1;
 static const unsigned __int8 s_taskDefaultScheduleType[NUM_TASK_TYPES] = {
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1  // .data:82A81284 (all 1 by default)
 };
-tsQueue s_queues[16];
+
 
 // Call this immediately after fileRead() fills a packfilehdr
 static void swapPackfileHdr(packfilehdr* h)
@@ -669,52 +669,6 @@ static const TaskWrapperFunc s_taskDispatch[NUM_TASK_TYPES] = {
 };  // .data:82A81294
 
 /* TASK BASED FUNCTIONS */
-
-void conditionWait(unsigned int conditionId)
-{
-    // Release the mutex associated with this condition
-    ReleaseMutex(MUTEX_HANDLE(s_conditionSlots[conditionId].mutexId));
-
-    // Wait for the condition event to be signalled
-    WaitForSingleObject(s_conditionSlots[conditionId].event, INFINITE);
-
-    // Re-acquire the mutex before returning
-    WaitForSingleObject(MUTEX_HANDLE(s_conditionSlots[conditionId].mutexId), INFINITE);
-}
-
-unsigned __int8 tsQueueAdd(unsigned int queueId, void* inItem,
-    unsigned __int8 blocking)
-{
-    tsQueue* q = &s_queues[queueId];
-
-    // Acquire the queue mutex
-    WaitForSingleObject(MUTEX_HANDLE(q->mutexId), INFINITE);
-
-    if (blocking)
-    {
-        // Wait until there is space (writePos - readPos < maxNumItems)
-        while (q->writePos - q->readPos >= q->maxNumItems)
-            conditionWait(q->condNotEmpty);
-    }
-
-    // Check if there is space
-    if (q->writePos - q->readPos >= q->maxNumItems)
-    {
-        ReleaseMutex(MUTEX_HANDLE(q->mutexId));
-        return 0;
-    }
-
-    // Copy item into the circular buffer at the next write slot
-    DWORD slot = q->writePos % q->maxNumItems;
-    memcpy((char*)q->buffer + slot * q->itemSize, inItem, q->itemSize);
-    q->writePos++;
-
-    // Signal a waiting consumer that an item is available
-    SetEvent(s_conditionSlots[q->condNotFull].event);
-
-    ReleaseMutex(MUTEX_HANDLE(q->mutexId));
-    return 1;
-}
 
 int taskmanStartTask(unsigned int     type,
     UTaskArgs* args,

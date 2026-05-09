@@ -1,8 +1,17 @@
 #include "FRDPeer.h"
 #include "logger/Log.h"
+#include "EngineNetDataStream.h"
+#include "engine/engineinit.h"
+
 #include <cstdio>
 #include <direct.h>
 #define DumpPacket
+
+void Serialise(
+    EngineNetDataStream* stream,
+    PacketReliability* reliability,
+    PacketCounter* count,
+    unsigned short* channel);
 
 FRDNetPeer::FRDNetPeer()
 {
@@ -385,9 +394,440 @@ Connection* FRDNetPeer::GetConnectionFromPublicID(ConnectionID* id)
     return nullptr;
 }
 
-void FRDNetPeer::ProcessNetworkPacket(unsigned int binaryAddress, unsigned __int16 port, char* data, unsigned int length, PacketHeader* header, unsigned __int8* pdata, int packetsize)
+void WriteHeaderData(PacketHeader* header, unsigned char** data, unsigned char* dataArray)
 {
-    STUB_STATIC();
+    EngineNetDataStream stream;
+    stream.m_read = false;
+    stream.m_data = dataArray;
+    stream.m_databitsize = 0x2780;
+    stream.m_bytenum = 0;
+    stream.m_bitnum = 0;
+
+    Serialise(&stream, &header->reliability, &header->count, &header->channel);
+
+    stream.Serialise(&header->connected);
+    stream.Serialise(&header->ackincluded);
+
+    if (header->ackincluded)
+    {
+        stream.Serialise(&header->acksend);
+        Serialise(&stream, &header->ackreliability, &header->ackcount, &header->ackchannel);
+    }
+
+    int bytesWritten = stream.m_bytenum;
+    if (stream.m_bitnum)
+        bytesWritten++;
+
+    *data = dataArray + bytesWritten;
+}
+
+void FRDNetPeer::AddAcknowledge(Connection* connection, PacketHeader* header)
+{
+    header->ackincluded = true;
+
+    PacketReliability ackRel = connection->m_acknowledgeReliability;
+
+    if (connection->m_acknowledgeSend)
+    {
+        header->acksend = true;
+
+        if (ackRel == ReliabilityReliable)
+        {
+            header->ackreliability = ReliabilityReliable;
+            header->ackcount.count = connection->rchannel.sendCounter.count;
+            connection->m_acknowledgeChannel = 0;
+            connection->m_acknowledgeReliability = ReliabilityReliableOrdered;
+        }
+        else
+        {
+            header->ackreliability = ReliabilityReliableOrdered;
+
+            int ch = (unsigned short)connection->m_acknowledgeChannel;
+            header->ackchannel = (unsigned short)ch;
+            header->ackcount.count = connection->rochannel[ch].sendCounter.count;
+
+            connection->m_acknowledgeChannel++;
+            if (connection->m_acknowledgeChannel >= 32)
+            {
+                connection->m_acknowledgeSend = false;
+                connection->m_acknowledgeReliability = ReliabilityReliable;
+            }
+        }
+    }
+    else
+    {
+        header->acksend = false;
+
+        if (ackRel == ReliabilityReliable)
+        {
+            header->ackreliability = ReliabilityReliable;
+            header->ackcount.count = connection->rchannel.recvCounter.count;
+            connection->m_acknowledgeChannel = 0;
+            connection->m_acknowledgeReliability = ReliabilityReliableOrdered;
+        }
+        else
+        {
+            header->ackreliability = ReliabilityReliableOrdered;
+
+            int ch = (unsigned short)connection->m_acknowledgeChannel;
+            header->ackchannel = (unsigned short)ch;
+            header->ackcount.count = connection->rochannel[ch].recvCounter.count;
+
+            connection->m_acknowledgeChannel++;
+            if (connection->m_acknowledgeChannel >= 32)
+            {
+                connection->m_acknowledgeSend = true;
+                connection->m_acknowledgeReliability = ReliabilityReliable;
+            }
+        }
+    }
+}
+
+void FRDNetPeer::SendSendBuffer(Connection* connection)
+{
+    int bufSize = connection->m_sendBufferSize;
+
+    if (FRDPeerHandler::s_peerHandler->m_socket.protocol == FRDSocket::PROTOCOL_VDP)
+    {
+        // VDP header: size field = bufSize - 2 (excludes the 2-byte size field itself)
+        *(unsigned short*)&connection->m_sendBuffer[0] = (unsigned short)(bufSize - 2);
+    }
+    else
+    {
+        // Standard UDP header: 0xF0 0x0D + checksum over bytes 6+
+        connection->m_sendBuffer[0] = 0xF0;
+        connection->m_sendBuffer[1] = 0x0D;
+
+        unsigned int checksum = 0;
+        int dataLen = bufSize - 6;
+        if (dataLen > 0)
+        {
+            unsigned char* p = &connection->m_sendBuffer[6];
+            for (int i = 0; i < dataLen; i++)
+            {
+                unsigned char b = p[i];
+                checksum ^= (checksum << 5) + (checksum >> 2) + b;
+            }
+        }
+
+        connection->m_sendBuffer[2] = (unsigned char)(checksum >> 24);
+        connection->m_sendBuffer[3] = (unsigned char)(checksum >> 16);
+        connection->m_sendBuffer[4] = (unsigned char)(checksum >> 8);
+        connection->m_sendBuffer[5] = (unsigned char)(checksum >> 0);
+    }
+
+    if (FRDPeerHandler::s_peerHandler->m_socket.s != -1)
+    {
+        FRDSockets::m_instance->SendTo(
+            &FRDPeerHandler::s_peerHandler->m_socket,
+            (const char*)connection->m_sendBuffer,
+            bufSize,
+            connection->m_connectionId.privateAddress.___u0.ip,
+            connection->m_connectionId.privateAddress.port);
+    }
+
+    connection->m_timeSinceSendBufferSend = 0.0f;
+    connection->m_sendBufferSize = 0;
+    m_stats.mergedPacketsSent++;
+}
+
+void FRDNetPeer::AddToSendBuffer(PacketPoolItem* p, bool voice)
+{
+    Connection* conn = GetConnectionFromPrivateID(&p->address);
+
+    unsigned char* data = p->data;
+    unsigned int   dataSize = (unsigned int)((char*)data - (char*)p + p->dataSize - 0x40);
+    unsigned short pktSize = (unsigned short)dataSize;
+
+    // Voice packets go straight out via VDP
+    if (voice && FRDPeerHandler::s_peerHandler->m_socket.protocol == FRDSocket::PROTOCOL_VDP)
+    {
+        // VDP header: [size(2)] [peerID(1)] [data...]
+        unsigned char buf[1280];
+        *(unsigned short*)buf = (unsigned short)(pktSize + 1);
+        buf[2] = (unsigned char)m_peerID;
+        memcpy(buf + 3, p->dataArray, pktSize);
+
+        if (FRDPeerHandler::s_peerHandler->m_socket.s != -1)
+            FRDSockets::m_instance->SendTo(
+                &FRDPeerHandler::s_peerHandler->m_socket,
+                (const char*)buf,
+                pktSize + 3,
+                p->address.___u0.ip,
+                p->address.port);
+        return;
+    }
+    unsigned char packetType = data[0];
+
+    // Connection-less or special packet types go straight out
+    if (!conn || packetType == 3 || packetType == 4 || packetType == 10)
+    {
+        if (FRDPeerHandler::s_peerHandler->m_socket.protocol == FRDSocket::PROTOCOL_VDP)
+        {
+            // VDP format: [size(2)] [peerID(1)] [data...]
+            unsigned char buf[1280];
+            *(unsigned short*)buf = (unsigned short)(pktSize + 1);
+            buf[2] = (unsigned char)m_peerID;
+            memcpy(buf + 3, p->dataArray, pktSize);
+
+            if (FRDPeerHandler::s_peerHandler->m_socket.s != -1)
+                FRDSockets::m_instance->SendTo(&FRDPeerHandler::s_peerHandler->m_socket,
+                    (const char*)buf, pktSize + 3,
+                    p->address.___u0.ip, p->address.port);
+        }
+        else
+        {
+            // Standard UDP format: [0xF0][0x0D][checksum(4)][peerID(1)][data...]
+            unsigned char buf[1280];
+            buf[0] = 0xF0;
+            buf[1] = 0x0D;
+            buf[6] = (unsigned char)m_peerID;
+            memcpy(buf + 7, p->dataArray, pktSize);
+
+            // Compute checksum over peerID + data
+            unsigned int checksum = 0;
+            unsigned char* cs = &buf[6];
+            for (unsigned int i = 0; i < pktSize + 1; i++)
+            {
+                unsigned char b = cs[i];
+                checksum ^= (checksum << 5) + (checksum >> 2) + b;
+            }
+            buf[2] = (unsigned char)(checksum >> 24);
+            buf[3] = (unsigned char)(checksum >> 16);
+            buf[4] = (unsigned char)(checksum >> 8);
+            buf[5] = (unsigned char)(checksum >> 0);
+
+            if (FRDPeerHandler::s_peerHandler->m_socket.s != -1)
+                FRDSockets::m_instance->SendTo(&FRDPeerHandler::s_peerHandler->m_socket,
+                    (const char*)buf, pktSize + 7,
+                    p->address.___u0.ip, p->address.port);
+        }
+
+        m_stats.mergedPacketsSent++;
+        return;
+    }
+
+    // Buffered send -- accumulate into connection send buffer
+    if (pktSize + conn->m_sendBufferSize + 3 > 1264)
+        SendSendBuffer(conn);
+
+    if (!conn->m_sendBufferSize)
+    {
+        // Initialize send buffer header
+        PacketHeader ackHeader;
+        memset(&ackHeader, 0, sizeof(ackHeader));
+        ackHeader.reliability = ReliabilityUnreliable;
+        ackHeader.connected = true;
+        AddAcknowledge(conn, &ackHeader);
+
+        unsigned char* headerStart;
+        unsigned char* writePtr;
+
+        if (FRDPeerHandler::s_peerHandler->m_socket.protocol == FRDSocket::PROTOCOL_VDP)
+        {
+            conn->m_sendBuffer[2] = (unsigned char)m_peerID;
+            headerStart = &conn->m_sendBuffer[3];
+        }
+        else
+        {
+            conn->m_sendBuffer[0] = 0xF0;
+            conn->m_sendBuffer[1] = 0x0D;
+            conn->m_sendBuffer[6] = (unsigned char)m_peerID;
+            headerStart = &conn->m_sendBuffer[7];
+        }
+
+        WriteHeaderData(&ackHeader, &writePtr, headerStart);
+
+        int headerSize = (int)(writePtr - (unsigned char*)conn - 0x2F);
+        *writePtr = 1; // mark as valid
+        conn->m_sendBufferSize = headerSize;
+        m_stats.systemBytesSent += headerSize;
+    }
+
+    // Append sub-packet: [size(2)][data...]
+    *(unsigned short*)&conn->m_sendBuffer[conn->m_sendBufferSize] = pktSize;
+    conn->m_sendBufferSize += 2;
+
+    memcpy(&conn->m_sendBuffer[conn->m_sendBufferSize], p->dataArray, pktSize);
+    conn->m_sendBufferSize += pktSize;
+
+    m_stats.systemBytesSent += 2;
+}
+
+float totalLatency = 0.0; // idb
+unsigned __int64 numLatency = 0uLL; // idb
+unsigned int count_4 = 0u; // idb
+unsigned __int64 numDelayInSecs = 0uLL; // idb
+
+void FRDNetPeer::ProcessNetworkPacket(
+    unsigned int    binaryAddress,
+    unsigned short  port,
+    unsigned char* data,
+    int             length,
+    PacketHeader* header,
+    unsigned char* pdata,
+    int             packetsize)
+{
+    // Set up read stream from packet data
+    EngineNetDataStream readStream;
+    readStream.m_read = true;
+    readStream.m_data = pdata;
+    readStream.m_databitsize = packetsize * 8;
+    readStream.m_bytenum = 1;
+    readStream.m_bitnum = 0;
+
+    // Store sender address
+    AddressID senderAddr;
+    senderAddr.___u0.ip = binaryAddress;
+    senderAddr.port = port;
+
+    RecvQueueItem qitem;
+    qitem.address = senderAddr;
+
+    unsigned char packetType = pdata[0];
+
+    if (packetType == 3)
+    {
+        // Ping request -- build pong response
+        EngineNetDataStream writeStream;
+        unsigned char       writeBuf[256];
+        writeStream.m_read = false;
+        writeStream.m_data = writeBuf;
+        writeStream.m_databitsize = 256 * 8;
+        writeStream.m_bytenum = 1;
+        writeStream.m_bitnum = 0;
+        writeBuf[0] = 4; // pong type
+
+        // Read timestamp from ping then write it into pong
+        double timestamp = 0.0;
+        readStream.Serialise(&timestamp);
+        writeStream.Serialise(&timestamp);
+
+        bool hasGameTime = false;
+        if (m_server)
+        {
+            hasGameTime = true;
+            writeStream.Serialise(&hasGameTime);
+            double gameTime = timerGameTime;
+            writeStream.Serialise(&gameTime);
+        }
+        else
+        {
+            writeStream.Serialise(&hasGameTime);
+        }
+
+        int responseSize = writeStream.m_bytenum;
+        if (writeStream.m_bitnum)
+            responseSize++;
+
+        Connection* conn = GetConnectionFromPrivateID(&senderAddr);
+
+        PacketPoolItem response;
+        memset(&response, 0, sizeof(response));
+        response.reliability = ReliabilityMax;
+        response.datavalid = true;
+        response.data = response.dataArray;
+        response.dataSize = responseSize;
+        response.header.reliability = ReliabilityUnreliable;
+        response.header.connected = (conn != nullptr);
+        response.address = senderAddr;
+
+        WriteHeaderData(&response.header, &response.data, response.dataArray);
+        memcpy(response.data, writeBuf, responseSize);
+        AddToSendBuffer(&response, false);
+
+        m_stats.totalPacketsSent++;
+        m_stats.systemBytesSent += responseSize;
+        m_stats.totalPacketsRecv++;
+    }
+    else if (packetType == 4)
+    {
+        // Pong response -- update latency stats
+        Connection* conn = GetConnectionFromPrivateID(&senderAddr);
+
+        double immediateTime = timerGetImmediateTime();
+        double sentTime = 0.0;
+        readStream.Serialise(&sentTime);
+
+        float travelTime = (float)(immediateTime - sentTime);
+
+        if (conn && header->connected)
+        {
+            conn->m_msgTravelTime[conn->m_msgTravelTimeIndex] = travelTime * 0.5f;
+            conn->m_msgTravelTimeIndex = (conn->m_msgTravelTimeIndex + 1) % 5;
+
+            conn->m_minLatency = 3.4028e38f;
+            conn->m_maxLatency = 0.0f;
+            conn->m_aveLatency = 0.0f;
+
+            for (int i = 0; i < 5; i++)
+            {
+                float t = conn->m_msgTravelTime[i];
+                if (t < conn->m_minLatency) conn->m_minLatency = t;
+                if (t > conn->m_maxLatency) conn->m_maxLatency = t;
+                conn->m_aveLatency += t;
+            }
+            conn->m_aveLatency *= 0.2f;
+
+            if (!m_server && conn->m_type == ConnectionTypeClientServer)
+            {
+                bool hasTargetTime = false;
+                readStream.Serialise(&hasTargetTime);
+
+                totalLatency += travelTime;
+                numLatency++;
+
+                if (hasTargetTime)
+                {
+                    double targetTime = 0.0;
+                    readStream.Serialise(&targetTime);
+
+                    if (count_4 % 5 == 0)
+                    {
+                        timerTargetGameTime = targetTime;
+                        numDelayInSecs++;
+                    }
+                    else
+                    {
+                        count_4++;
+                    }
+                }
+            }
+        }
+
+        // Write pong reply into queue item
+        EngineNetDataStream writeStream;
+        writeStream.m_read = false;
+        writeStream.m_data = qitem.data;
+        writeStream.m_databitsize = sizeof(qitem.data) * 8;
+        writeStream.m_bytenum = 1;
+        writeStream.m_bitnum = 0;
+        qitem.data[0] = 4;
+
+        unsigned int   addrVal = binaryAddress;
+        unsigned short portVal = port;
+        unsigned int   timeVal = 0;
+        memcpy(&timeVal, &travelTime, sizeof(float));
+
+        writeStream.Serialise(&addrVal, 0u, 0xFFFFFFFFu);
+        writeStream.Serialise(&portVal, (unsigned short)0, (unsigned short)0xFFFF);
+        writeStream.Serialise(&timeVal, 0u, 0xFFFFFFFFu);
+
+        int writeSize = writeStream.m_bytenum;
+        if (writeStream.m_bitnum)
+            writeSize++;
+
+        qitem.dataSize = writeSize;
+        tsQueueAdd(m_recvQueue, (char*)&qitem, false);
+        m_stats.totalPacketsRecv++;
+    }
+    else
+    {
+        // Regular data packet -- copy into queue item and enqueue
+        qitem.dataSize = length;
+        memcpy(qitem.data, data, length);
+        tsQueueAdd(m_recvQueue, (char*)&qitem, false);
+    }
 }
 
 bool FRDNetPeer::Initialize(
@@ -458,10 +898,80 @@ bool FRDNetPeer::Initialize(
     return FRDPeerHandler::s_peerHandler->AddPeer(this, peerid, localPort, online);
 }
 
-
-void __fastcall ReadHeaderData(PacketHeader* header, unsigned __int8** data, unsigned __int8* dataArray)
+void Serialise(
+    EngineNetDataStream* stream,
+    PacketReliability* reliability,
+    PacketCounter* count,
+    unsigned short* channel)
 {
-    STUB_STATIC();
+    unsigned int rel = 0;
+
+    if (!stream->m_read)
+        rel = (unsigned int)*reliability;
+
+    stream->Serialise(&rel, 0, 3);
+
+    if (stream->m_read)
+        *reliability = (PacketReliability)rel;
+
+    switch (*reliability)
+    {
+    case ReliabilityUnreliableOrdered:
+        stream->Serialise(&count->count, 0, 0x3FF);
+        stream->Serialise(channel, 0, 0x7FF);
+        break;
+
+    case ReliabilityReliable:
+        stream->Serialise(&count->count, 0, 0x3FF);
+        break;
+
+    case ReliabilityReliableOrdered:
+        stream->Serialise(&count->count, 0, 0x3FF);
+        stream->Serialise(channel, 0, 0x1F);
+        break;
+
+    case ReliabilityUnreliable:
+    default:
+        // No count or channel for unreliable packets
+        break;
+    }
+}
+
+void ReadHeaderData(PacketHeader* header, unsigned char** data, unsigned char* dataArray)
+{
+    EngineNetDataStream stream;
+    stream.m_read = true;
+    stream.m_data = dataArray;
+    stream.m_databitsize = 0x2780;
+    stream.m_bytenum = 0;
+    stream.m_bitnum = 0;
+
+    // Read reliability, count, channel
+    Serialise(&stream, &header->reliability, &header->count, &header->channel);
+
+    // Read connected and ackincluded bools
+    stream.Serialise(&header->connected);
+    stream.Serialise(&header->ackincluded);
+
+    if (header->ackincluded)
+    {
+        stream.Serialise(&header->acksend);
+        Serialise(&stream, &header->ackreliability, &header->ackcount, &header->ackchannel);
+    }
+    else
+    {
+        header->acksend = false;
+        header->ackreliability = ReliabilityUnreliable;
+        header->ackchannel = 0;
+        header->ackcount.count = 0;
+    }
+
+    // Advance data pointer past the header bytes consumed
+    int bytesRead = stream.m_bytenum;
+    if (stream.m_bitnum)
+        bytesRead++;
+
+    *data = dataArray + bytesRead;
 }
 
 void FRDPeerHandler::ProcessNetworkPacket(
@@ -528,7 +1038,7 @@ void FRDPeerHandler::ProcessNetworkPacket(
             int packetLen = dataLen - (int)(unsigned int)pdata;
             peer->ProcessNetworkPacket(
                 binaryAddress, port,
-                (char*)data + 3, dataLen,
+                (unsigned char*)data + 3, dataLen,
                 &header, pdata, packetLen);
         }
 
@@ -541,7 +1051,7 @@ void FRDPeerHandler::ProcessNetworkPacket(
             int packetLen = remaining - (int)(unsigned int)pdata;
             peer->ProcessNetworkPacket(
                 binaryAddress, port,
-                (char*)next, remaining,
+                next, remaining,
                 &header, pdata, packetLen);
         }
 
@@ -587,7 +1097,7 @@ void FRDPeerHandler::ProcessNetworkPacket(
         int packetLen = payloadLen - (int)(unsigned int)pdata;
         peer->ProcessNetworkPacket(
             binaryAddress, port,
-            (char*)payload, payloadLen,
+            payload, payloadLen,
             &header, pdata, packetLen);
 
         peer->m_stats.bytesRecv += length;

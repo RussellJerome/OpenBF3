@@ -132,6 +132,9 @@
     <ClCompile Include="framework\network\FRDPeer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="framework\network\EngineNetDataStream.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="engine\engineinit.h">
@@ -225,6 +228,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="framework\network\FRDPeer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framework\network\EngineNetDataStream.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

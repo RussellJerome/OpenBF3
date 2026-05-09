@@ -1111,3 +1111,64 @@ void taskmanStartThreadExHW(HANDLE thread)
     SetThreadPriority(thread, THREAD_PRIORITY_NORMAL);
     ResumeThread(thread);
 }
+
+
+_LARGE_INTEGER timerGameStartTime = { { 0, 0u } };
+_LARGE_INTEGER timerFrequency = { { 0, 0u } };
+
+double timerGetImmediateTime()
+{
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+
+    __int64 elapsed = counter.QuadPart - timerGameStartTime.QuadPart;
+    return (double)elapsed / (double)timerFrequency.QuadPart;
+}
+
+tsQueue s_queues[16];
+
+void conditionWait(unsigned int conditionId)
+{
+    // Release the mutex associated with this condition
+    ReleaseMutex(MUTEX_HANDLE(s_conditionSlots[conditionId].mutexId));
+
+    // Wait for the condition event to be signalled
+    WaitForSingleObject(s_conditionSlots[conditionId].event, INFINITE);
+
+    // Re-acquire the mutex before returning
+    WaitForSingleObject(MUTEX_HANDLE(s_conditionSlots[conditionId].mutexId), INFINITE);
+}
+
+unsigned __int8 tsQueueAdd(unsigned int queueId, void* inItem,
+    unsigned __int8 blocking)
+{
+    tsQueue* q = &s_queues[queueId];
+
+    // Acquire the queue mutex
+    WaitForSingleObject(MUTEX_HANDLE(q->mutexId), INFINITE);
+
+    if (blocking)
+    {
+        // Wait until there is space (writePos - readPos < maxNumItems)
+        while (q->writePos - q->readPos >= q->maxNumItems)
+            conditionWait(q->condNotEmpty);
+    }
+
+    // Check if there is space
+    if (q->writePos - q->readPos >= q->maxNumItems)
+    {
+        ReleaseMutex(MUTEX_HANDLE(q->mutexId));
+        return 0;
+    }
+
+    // Copy item into the circular buffer at the next write slot
+    DWORD slot = q->writePos % q->maxNumItems;
+    memcpy((char*)q->buffer + slot * q->itemSize, inItem, q->itemSize);
+    q->writePos++;
+
+    // Signal a waiting consumer that an item is available
+    SetEvent(s_conditionSlots[q->condNotFull].event);
+
+    ReleaseMutex(MUTEX_HANDLE(q->mutexId));
+    return 1;
+}

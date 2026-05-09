@@ -165,6 +165,13 @@ struct FRDNetStats
 	unsigned int packetSizesRecvCurrent[8];
 };
 
+struct RecvQueueItem
+{
+	AddressID address;
+	int dataSize;
+	unsigned __int8 data[1264];
+};
+
 class FRDNetPeer
 {
 public:
@@ -193,7 +200,17 @@ public:
 	Connection* GetConnectionFromPrivateID(AddressID* id);
 	Connection* GetConnectionFromPublicID(AddressID* id);
 	Connection* GetConnectionFromPublicID(ConnectionID* id);
-	void ProcessNetworkPacket(unsigned int binaryAddress, unsigned __int16 port, char* data, unsigned int length, PacketHeader* header, unsigned __int8* pdata, int packetsize);
+	void AddToSendBuffer(PacketPoolItem* p, bool voice);
+	void AddAcknowledge(Connection* connection, PacketHeader* header);
+	void SendSendBuffer(Connection* connection);
+	void ProcessNetworkPacket(
+		unsigned int    binaryAddress,
+		unsigned short  port,
+		unsigned char* data,
+		int             length,
+		PacketHeader* header,
+		unsigned char* pdata,
+		int             packetsize);
 	bool Initialize(
 		int            peerid,
 		unsigned int   maxNumPeers,
