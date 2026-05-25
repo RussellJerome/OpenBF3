@@ -3,6 +3,7 @@
 #include "string/engstring.h"
 #include "util/unorgtypes.h"
 #include "../util/mathf.h"
+#include <cassert>
 
 unsigned __int8 s_memInitDone = 0u;
 unsigned int s_memMutex = (unsigned int)-1;
@@ -1139,36 +1140,145 @@ void conditionWait(unsigned int conditionId)
     WaitForSingleObject(MUTEX_HANDLE(s_conditionSlots[conditionId].mutexId), INFINITE);
 }
 
-unsigned __int8 tsQueueAdd(unsigned int queueId, void* inItem,
-    unsigned __int8 blocking)
+bool tsQueueAdd(unsigned int queueId, void* inItem, bool blocking)
 {
-    tsQueue* q = &s_queues[queueId];
+    tsQueueEntry* q = &g_tsQueues[queueId];
 
-    // Acquire the queue mutex
-    WaitForSingleObject(MUTEX_HANDLE(q->mutexId), INFINITE);
+    HANDLE mutex = s_mutexSlots[q->mutex].handle;
+    WaitForSingleObject(mutex, INFINITE);
 
     if (blocking)
     {
-        // Wait until there is space (writePos - readPos < maxNumItems)
-        while (q->writePos - q->readPos >= q->maxNumItems)
-            conditionWait(q->condNotEmpty);
+        while (q->writeIdx >= q->maxNumItems)
+        {
+            ReleaseMutex(mutex);
+            WaitForSingleObject(g_conditions[q->notFull].event, INFINITE);
+            WaitForSingleObject(mutex, INFINITE);
+        }
     }
 
-    // Check if there is space
-    if (q->writePos - q->readPos >= q->maxNumItems)
+    if (q->writeIdx >= q->maxNumItems)
     {
-        ReleaseMutex(MUTEX_HANDLE(q->mutexId));
-        return 0;
+        ReleaseMutex(mutex);
+        return false;
     }
 
-    // Copy item into the circular buffer at the next write slot
-    DWORD slot = q->writePos % q->maxNumItems;
-    memcpy((char*)q->buffer + slot * q->itemSize, inItem, q->itemSize);
-    q->writePos++;
+    // Copy into circular buffer at write position
+    unsigned int slot = (q->readIdx + q->writeIdx) % q->maxNumItems;
+    memcpy((unsigned char*)q->buffer + slot * q->itemSize, inItem, q->itemSize);
+    q->writeIdx++;
 
-    // Signal a waiting consumer that an item is available
-    SetEvent(s_conditionSlots[q->condNotFull].event);
+    // Signal consumer that data is available
+    SetEvent(g_conditions[q->notEmpty].event);
 
-    ReleaseMutex(MUTEX_HANDLE(q->mutexId));
-    return 1;
+    ReleaseMutex(mutex);
+    return true;
+}
+
+poolObject* poolAllocAE(poolStateAE_s* poolae)
+{
+    // If no free items, try to extend the pool
+    if (!poolae->state.free)
+    {
+        bool ok = poolAddObjectsArrayFromHeapAE(poolae, poolae->extendCount);
+        if (!ok)
+            return nullptr;
+    }
+
+    poolObject* item = (poolObject*)poolae->state.free;
+    if (item)
+    {
+        poolae->state.free = item->next;
+        poolae->state.freeCount--;
+    }
+
+    return item;
+}
+
+bool poolAddObjectsArrayFromHeapAE(poolStateAE_s* ioPoolAE, unsigned int inObjectCount)
+{
+    // Allocate tracking node
+    poolObjArray_s* node = (poolObjArray_s*)memAllocAlignCore(
+        sizeof(poolObjArray_s),
+        ioPoolAE->heap,
+        0,
+        "source/util/pool.c",
+        191,
+        nullptr,
+        1);
+
+    if (!node)
+        return false;
+
+    // Allocate object array
+    int objectSize = ioPoolAE->state.objectSize & 0xFFFFFFF;
+    int totalSize = objectSize * inObjectCount;
+
+    void* objects = nullptr;
+    if (totalSize > 0)
+    {
+        objects = memAllocAlignCore(
+            totalSize,
+            ioPoolAE->heap,
+            0,
+            "source/util/pool.c",
+            194,
+            nullptr,
+            1);
+    }
+
+    node->array = objects;
+
+    if (!objects)
+    {
+        memFreeFlags((char*)node, 1);
+        return false;
+    }
+
+    // Link node into pool's array list
+    node->prev = ioPoolAE->addObjArrays;
+    ioPoolAE->addObjArrays = node;
+
+    // Add objects to the free list
+    poolAddObjectsArray(&ioPoolAE->state, (char*)objects, inObjectCount);
+
+    return true;
+}
+
+bool tsQueueRemove(unsigned int queueId, void* outItem, bool blocking)
+{
+    tsQueueEntry* q = &g_tsQueues[queueId];
+
+    // Acquire mutex using s_mutexSlots
+    HANDLE mutex = s_mutexSlots[q->mutex].handle;
+    WaitForSingleObject(mutex, INFINITE);
+
+    // If blocking, wait until data is available
+    if (blocking && q->readIdx == q->writeIdx)
+    {
+        do
+        {
+            ReleaseMutex(mutex);
+            WaitForSingleObject(g_conditions[q->notEmpty].event, INFINITE);
+            WaitForSingleObject(mutex, INFINITE);
+        } while (q->readIdx == q->writeIdx);
+    }
+
+    bool hasItem = (q->readIdx != q->writeIdx);
+
+    if (hasItem)
+    {
+        unsigned char* src = (unsigned char*)q->buffer + q->readIdx * q->itemSize;
+        memcpy(outItem, src, q->itemSize);
+
+        assert(q->maxNumItems > 0);
+        q->readIdx = (q->readIdx + 1) % q->maxNumItems;
+        q->writeIdx--;
+
+        // Signal notFull
+        SetEvent(g_conditions[q->notFull].event);
+    }
+
+    ReleaseMutex(mutex);
+    return hasItem;
 }

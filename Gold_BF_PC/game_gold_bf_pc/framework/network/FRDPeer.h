@@ -1,6 +1,7 @@
 #pragma once
 #include "FRDSockets.h"
 #include "engine/mem.h"
+#include "EngineNetDataStream.h"
 
 enum FRDNATType : __int32
 {
@@ -18,12 +19,15 @@ union $86F42592D46BAB39BF3744EC664D567B
 
 struct __declspec(align(4)) AddressID
 {
+	void Serialise(EngineNetDataStream* stream);
 	$86F42592D46BAB39BF3744EC664D567B ___u0;
 	unsigned __int16 port;
 };
 
 struct __declspec(align(4)) ConnectionID
 {
+	void Serialise(EngineNetDataStream* stream);
+
 	FRDNATType nat;
 	AddressID privateAddress;
 	AddressID publicAddress;
@@ -44,6 +48,34 @@ enum PacketReliability : __int32
 	ReliabilityReliable = 0x2,
 	ReliabilityReliableOrdered = 0x3,
 	ReliabilityMax = 0x4,
+};
+
+enum FRDNetPacketType_e : __int32
+{
+	FRDNETPACKET_NONE = 0x0,
+	FRDNETPACKET_MULTIPACKET = 0x1,
+	FRDNETPACKET_REQUESTRESEND = 0x2,
+	FRDNETPACKET_PING = 0x3,
+	FRDNETPACKET_PONG = 0x4,
+	FRDNETPACKET_CONNECTION_REQUEST = 0x5,
+	FRDNETPACKET_CONNECTION_REQUEST_ACCEPTED = 0x6,
+	FRDNETPACKET_CONNECTION_ESTABLISHED = 0x7,
+	FRDNETPACKET_CONNECTION_ATTEMPT_FAILED = 0x8,
+	FRDNETPACKET_CONNECTION_LOST = 0x9,
+	FRDNETPACKET_DISCONNECTION = 0xA,
+	FRDNETPACKET_REQUEST_REMOTE_CONNECTIONS = 0xB,
+	FRDNETPACKET_ADD_REMOTE_CONNECTION = 0xC,
+	FRDNETPACKET_REMOVE_REMOTE_CONNECTION = 0xD,
+	FRDNETPACKET_LOOKING_FOR_SERVER = 0xE,
+	FRDNETPACKET_I_AM_SERVER = 0xF,
+	FRDNETPACKET_REQUEST_GAMEINFO = 0x10,
+	FRDNETPACKET_GAMEINFO = 0x11,
+	FRDNETPACKET_I_AM_CLIENT = 0x12,
+	FRDNETPACKET_LOST_SERVER_CONNECTION = 0x13,
+	FRDNETPACKET_REMOVE_SERVER_CONNECTION = 0x14,
+	FRDNETPACKET_THIS_IS_MY_ADDRESS = 0x15,
+	FRDNETPACKET_GOT_YOUR_ADDRESS = 0x16,
+	FRDNETPACKET_NUM = 0x17,
 };
 
 struct PacketCounter
@@ -219,8 +251,17 @@ public:
 		bool           isDedicated,
 		bool           allowServerMigration,
 		bool           online);
-
+	void __fastcall ProcessPacket(PacketPoolItem* ppitem);
+	void QueueProcessPacket(PacketPoolItem* ppitem);
+	void ProcessConnectionRequest(PacketPoolItem* ppitem);
+	void Tick(float timeslice);
+	void SendRemoveRemoteConnection(Connection* connectionin);
 	void Deinitialize();
+	void RemoveAcknowledge(Connection* connection, PacketHeader* header);
+	void __fastcall ConnectionFailed(AddressID* id);
+	void __fastcall SendThisIsMyAddress(Connection* connection);
+	void __fastcall LookingForServerPing(Connection* connection);
+	void __fastcall Ping(ConnectionID* id);
 
 	int m_peerID;
 	int m_maxNumPeers;
@@ -258,6 +299,8 @@ public:
 		unsigned short port,
 		const char* data,
 		int length);
+	PacketPoolItem* AllocPacketPoolItem(int size, bool reliable, FRDNetPeer* peer);
+
 	bool(__cdecl* m_externalSDKProcessPacketFuncs[2])(unsigned int, unsigned __int16, const char*, int);
 	FRDNetPeer* m_peers[2];
 	FRDSocket m_socket;

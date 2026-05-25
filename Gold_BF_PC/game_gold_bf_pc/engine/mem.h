@@ -219,7 +219,9 @@ unsigned int tsQueueCreate(unsigned int maxNumItems, unsigned int itemSize);
 int memAllocGroupRandomBlockSizeEx(const char* inName, int groupmemsize, unsigned __int8 allocLow);
 void* poolFreePool(poolState* pool);
 void taskmanStartThreadExHW(HANDLE thread);
-unsigned __int8 tsQueueAdd(unsigned int queueId, void* inItem,
-    unsigned __int8 blocking);
+bool tsQueueAdd(unsigned int queueId, void* inItem, bool blocking);
 void conditionWait(unsigned int conditionId);
 double timerGetImmediateTime();
+poolObject* poolAllocAE(poolStateAE_s* poolae);
+bool poolAddObjectsArrayFromHeapAE(poolStateAE_s* ioPoolAE, unsigned int inObjectCount);
+bool tsQueueRemove(unsigned int queueId, void* outItem, bool blocking);

@@ -1,10 +1,12 @@
 #include "FRDPeer.h"
 #include "logger/Log.h"
-#include "EngineNetDataStream.h"
 #include "engine/engineinit.h"
 
 #include <cstdio>
 #include <direct.h>
+
+unsigned int s_packetSizes[8] = { 16u, 32u, 48u, 64u, 96u, 128u, 192u, 4096u };
+
 #define DumpPacket
 
 void Serialise(
@@ -825,8 +827,8 @@ void FRDNetPeer::ProcessNetworkPacket(
     {
         // Regular data packet -- copy into queue item and enqueue
         qitem.dataSize = length;
-        memcpy(qitem.data, data, length);
-        tsQueueAdd(m_recvQueue, (char*)&qitem, false);
+        //memcpy(qitem.data, data, length);
+        //tsQueueAdd(m_recvQueue, (char*)&qitem, false);
     }
 }
 
@@ -896,6 +898,11 @@ bool FRDNetPeer::Initialize(
     m_allowServerMigration = allowServerMigration;
 
     return FRDPeerHandler::s_peerHandler->AddPeer(this, peerid, localPort, online);
+}
+
+void __fastcall FRDNetPeer::ProcessPacket(PacketPoolItem* ppitem)
+{
+    STUB_STATIC();
 }
 
 void Serialise(
@@ -1105,6 +1112,330 @@ void FRDPeerHandler::ProcessNetworkPacket(
     }
 }
 
+void FRDNetPeer::QueueProcessPacket(PacketPoolItem* ppitem)
+{
+    Connection* conn = GetConnectionFromPrivateID(&ppitem->address);
+
+    // Set up read stream
+    EngineNetDataStream stream;
+    stream.m_read = true;
+    stream.m_data = ppitem->data;
+    stream.m_databitsize = (int)((ppitem->dataSize - (unsigned int)ppitem + (unsigned int)ppitem->data) * 8);
+    stream.m_bytenum = 1;
+    stream.m_bitnum = 0;
+
+    // Track packet size stats
+    int packetSize = (int)((unsigned int)ppitem->data - (unsigned int)ppitem + ppitem->dataSize - 0x40);
+    m_stats.totalPacketsRecv++;
+    for (int i = 0; i < 7; i++)
+    {
+        if (packetSize <= (int)s_packetSizes[i])
+        {
+            m_stats.packetSizesRecv[i]++;
+            break;
+        }
+    }
+
+    // Connection request is handled separately
+    if (*ppitem->data == FRDNETPACKET_CONNECTION_REQUEST)
+    {
+        DbgPrint("ProcessConnectionRequest");
+        ProcessConnectionRequest(ppitem);
+        return;
+    }
+
+    switch (ppitem->header.reliability)
+    {
+    case ReliabilityReliable:
+    {
+        if (!conn || !conn->m_accepted)
+            return;
+
+        dlinklistdef_s* recvList = &conn->rchannel.recvList;
+
+        // Check if this packet is already in the recv list (resend case)
+        for (dlinkdef_s* node = recvList->head;
+            (dlinklistdef_s*)node != recvList;
+            node = node->next)
+        {
+            PacketPoolItem* existing = (PacketPoolItem*)((char*)node + recvList->offset);
+            if (existing->datavalid &&
+                existing->header.count.count == ppitem->header.count.count)
+            {
+                existing->timer = 0.0f;
+                return;
+            }
+        }
+
+        // Determine expected count
+        unsigned short expectedCount = conn->rchannel.recvCounter.count;
+        PacketPoolItem* tail = nullptr;
+
+        if ((dlinklistdef_s*)recvList->tail != recvList)
+        {
+            tail = (PacketPoolItem*)((char*)recvList->tail + recvList->offset);
+            unsigned short nextCount = (tail->header.count.count + 1) & 0x3FF;
+
+            if (((nextCount - conn->rchannel.recvCounter.count) & 0x3FF) < 0x200)
+                expectedCount = nextCount;
+        }
+
+        if (tail)
+        {
+            unsigned short diff = (ppitem->header.count.count - tail->header.count.count) & 0x3FF;
+            if (diff == 0 || diff >= 0x200)
+            {
+                // Find in list and replace
+                for (dlinkdef_s* node = recvList->tail;
+                    (dlinklistdef_s*)node != recvList;
+                    node = node->prev)
+                {
+                    PacketPoolItem* existing = (PacketPoolItem*)((char*)node + recvList->offset);
+                    if (existing->header.count.count == ppitem->header.count.count)
+                    {
+                        // Copy data into existing slot
+                        existing->resendrequested = ppitem->resendrequested;
+                        existing->link = ppitem->link;
+                        existing->allocatedSize = ppitem->allocatedSize;
+                        existing->allocatedReliable = ppitem->allocatedReliable;
+                        memcpy((void*)existing, ppitem, 0x530);
+                        existing->allocatedSize = existing->allocatedSize;
+                        existing->allocatedReliable = existing->allocatedReliable;
+                        existing->data = &ppitem->data[(char*)existing - (char*)ppitem];
+                        break;
+                    }
+                }
+                goto process_reliable;
+            }
+        }
+
+        // Fill in missing sequence slots with placeholder packets
+        while (((expectedCount - ppitem->header.count.count) & 0x3FF) >= 0x200)
+        {
+            PacketPoolItem* placeholder = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(1264, true, this);
+            if (placeholder)
+            {
+                placeholder->header.reliability = ReliabilityReliable;
+                placeholder->header.count.count = expectedCount;
+                placeholder->datavalid = false;
+
+                // Insert at tail of recv list
+                dlinkdef_s* link = &placeholder->link;
+                link->prev = recvList->tail;
+                link->next = (dlinkdef_s*)recvList;
+                recvList->tail->next = link;
+                recvList->tail = link;
+            }
+            expectedCount = (expectedCount + 1) & 0x3FF;
+        }
+
+        // Allocate and insert the actual packet
+        {
+            PacketPoolItem* newItem = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(ppitem->dataSize, true, this);
+            if (newItem)
+            {
+                int savedAllocSize = newItem->allocatedSize;
+                bool savedAllocRel = newItem->allocatedReliable;
+                memcpy(newItem, ppitem, 0x530);
+                newItem->allocatedSize = savedAllocSize;
+                newItem->allocatedReliable = savedAllocRel;
+                newItem->data = &ppitem->data[(char*)newItem - (char*)ppitem];
+
+                dlinkdef_s* link = &newItem->link;
+                link->prev = recvList->tail;
+                link->next = (dlinkdef_s*)recvList;
+                recvList->tail->next = link;
+                recvList->tail = link;
+            }
+        }
+
+    process_reliable:
+        ProcessPacket(ppitem);
+
+        // Advance recv counter for in-order packets
+        for (dlinkdef_s* node = recvList->head;
+            (dlinklistdef_s*)node != recvList;
+            node = node->next)
+        {
+            PacketPoolItem* item = (PacketPoolItem*)((char*)node + recvList->offset);
+            if (item->datavalid &&
+                item->header.count.count == conn->rchannel.recvCounter.count)
+            {
+                conn->rchannel.recvCounter.count =
+                    (conn->rchannel.recvCounter.count + 1) & 0x3FF;
+            }
+        }
+        break;
+    }
+
+    case ReliabilityReliableOrdered:
+    {
+        if (!conn || !conn->m_accepted)
+            return;
+
+        Connection::ROChannel* rochan = &conn->rochannel[ppitem->header.channel];
+        dlinklistdef_s* recvList = &rochan->recvList;
+
+        // Check if already in list
+        for (dlinkdef_s* node = recvList->head;
+            (dlinklistdef_s*)node != recvList;
+            node = node->next)
+        {
+            PacketPoolItem* existing = (PacketPoolItem*)((char*)node + recvList->offset);
+            if (existing->datavalid &&
+                existing->header.count.count == ppitem->header.count.count)
+            {
+                existing->timer = 0.0f;
+                return;
+            }
+        }
+
+        unsigned short expectedCount = rochan->recvCounter.count;
+        PacketPoolItem* tail = nullptr;
+
+        if ((dlinklistdef_s*)recvList->tail != recvList)
+        {
+            tail = (PacketPoolItem*)((char*)recvList->tail + recvList->offset);
+            unsigned short nextCount = (tail->header.count.count + 1) & 0x3FF;
+
+            if (((nextCount - rochan->recvCounter.count) & 0x3FF) < 0x200)
+                expectedCount = nextCount;
+        }
+
+        if (tail)
+        {
+            unsigned short diff = (ppitem->header.count.count - tail->header.count.count) & 0x3FF;
+            if (diff == 0 || diff >= 0x200)
+            {
+                // Find and replace in list
+                for (dlinkdef_s* node = recvList->tail;
+                    (dlinklistdef_s*)node != recvList;
+                    node = node->prev)
+                {
+                    PacketPoolItem* existing = (PacketPoolItem*)((char*)node + recvList->offset);
+                    if (existing->header.count.count == ppitem->header.count.count)
+                    {
+                        existing->resendrequested = ppitem->resendrequested;
+                        existing->link = ppitem->link;
+                        existing->allocatedSize = ppitem->allocatedSize;
+                        existing->allocatedReliable = ppitem->allocatedReliable;
+                        memcpy((void*)existing, ppitem, 0x530);
+                        existing->allocatedSize = existing->allocatedSize;
+                        existing->allocatedReliable = existing->allocatedReliable;
+                        existing->data = &ppitem->data[(char*)existing - (char*)ppitem];
+                        break;
+                    }
+                }
+                goto process_ordered;
+            }
+        }
+
+        // Fill missing slots
+        while (((expectedCount - ppitem->header.count.count) & 0x3FF) >= 0x200)
+        {
+            PacketPoolItem* placeholder = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(1264, true, this);
+            if (placeholder)
+            {
+                placeholder->header.reliability = ReliabilityReliableOrdered;
+                placeholder->header.channel = ppitem->header.channel;
+                placeholder->header.count.count = expectedCount;
+                placeholder->datavalid = false;
+
+                dlinkdef_s* link = &placeholder->link;
+                link->prev = recvList->tail;
+                link->next = (dlinkdef_s*)recvList;
+                recvList->tail->next = link;
+                recvList->tail = link;
+            }
+            expectedCount = (expectedCount + 1) & 0x3FF;
+        }
+
+        // Allocate and insert actual packet
+        {
+            PacketPoolItem* newItem = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(ppitem->dataSize, true, this);
+            if (newItem)
+            {
+                int savedAllocSize = newItem->allocatedSize;
+                bool savedAllocRel = newItem->allocatedReliable;
+                memcpy(newItem, ppitem, 0x530);
+                newItem->allocatedSize = savedAllocSize;
+                newItem->allocatedReliable = savedAllocRel;
+                newItem->data = &ppitem->data[(char*)newItem - (char*)ppitem];
+
+                dlinkdef_s* link = &newItem->link;
+                link->prev = recvList->tail;
+                link->next = (dlinkdef_s*)recvList;
+                recvList->tail->next = link;
+                recvList->tail = link;
+            }
+        }
+
+    process_ordered:
+        // Process in-order packets from the recv list
+        for (dlinkdef_s* node = recvList->head;
+            (dlinklistdef_s*)node != recvList;
+            node = node->next)
+        {
+            PacketPoolItem* item = (PacketPoolItem*)((char*)node + recvList->offset);
+            if (item->datavalid &&
+                item->header.count.count == rochan->recvCounter.count)
+            {
+                rochan->recvCounter.count = (rochan->recvCounter.count + 1) & 0x3FF;
+                ProcessPacket(item);
+                item->timer = 0.0f;
+            }
+        }
+        break;
+    }
+
+    case ReliabilityUnreliableOrdered:
+    {
+        if (!conn || !conn->m_accepted)
+            return;
+
+        int ch = ppitem->header.channel;
+        unsigned short recvCount = conn->uchannel[ch].recvCounter.count;
+        unsigned short pktCount = ppitem->header.count.count;
+
+        if (((pktCount - recvCount) & 0x3FF) < 0x200)
+        {
+            conn->uchannel[ch].recvCounter.count = pktCount;
+            ProcessPacket(ppitem);
+        }
+        break;
+    }
+
+    default: // ReliabilityUnreliable
+    {
+        unsigned char pktType = *ppitem->data;
+
+        bool shouldProcess = false;
+        if (conn && (conn->m_accepted ||
+            pktType == FRDNETPACKET_CONNECTION_REQUEST_ACCEPTED ||
+            pktType == FRDNETPACKET_CONNECTION_ESTABLISHED))
+        {
+            shouldProcess = true;
+        }
+        if (pktType == FRDNETPACKET_PING ||
+            pktType == FRDNETPACKET_PONG ||
+            pktType == FRDNETPACKET_REQUEST_GAMEINFO ||
+            pktType == FRDNETPACKET_GAMEINFO)
+        {
+            shouldProcess = true;
+        }
+
+        if (shouldProcess)
+            ProcessPacket(ppitem);
+        break;
+    }
+    }
+}
+
+void FRDNetPeer::ProcessConnectionRequest(PacketPoolItem* ppitem)
+{
+    STUB_STATIC();
+}
+
 DWORD WINAPI FRDNetLoop(void* arg)
 {
     FRDPeerHandler* handler = (FRDPeerHandler*)arg;
@@ -1218,6 +1549,935 @@ bool FRDPeerHandler::AddPeer(FRDNetPeer* peer, int id, unsigned short localPort,
 
     m_peers[id] = peer;
     return true;
+}
+
+PacketPoolItem* FRDPeerHandler::AllocPacketPoolItem(int size, bool reliable, FRDNetPeer* peer)
+{
+    int sizeIdx = 0;
+    PacketSizes* sizes = &m_sizes[0];
+
+    // Find appropriate size bucket
+    while (true)
+    {
+        if (size <= sizes->maxNumAllocated)
+        {
+            // Free unreliable packets if bucket is more than half full
+            int used = sizes->numAllocated;
+            int maxHalf = sizes->maxNumAllocated >> 1;
+            int maxQuart = sizes->maxNumAllocated >> 2;
+
+            if (used - sizes->numReliableAllocated > maxHalf)
+                peer->FreeUnreliablePackets(maxQuart);
+
+            // Check global pool capacity
+            if (m_numAllocated < m_maxNum)
+                break;
+
+            peer->FreeUnreliablePackets(0);
+
+            if (m_numAllocated < m_maxNum || sizeIdx == 0)
+                break;
+        }
+
+        sizes++;
+        sizeIdx++;
+
+        if (sizeIdx >= (int)(sizeof(m_sizes) / sizeof(m_sizes[0])))
+            return nullptr;
+    }
+
+    // Allocate from pool
+    PacketPoolItem* item = (PacketPoolItem*)poolAllocAE(&m_packetPool.m_poolae);
+
+    if (item)
+    {
+        item->header.count.count = 0;
+        item->header.channel = 0;
+        item->header.acksend = false;
+        item->header.ackcount.count = 0;
+        item->resendrequested = false;
+        item->timer = 0.0f;
+        item->datavalid = true;
+        item->data = item->dataArray;
+        item->allocatedSize = sizeIdx;
+    }
+
+    if (item)
+    {
+        item->dataSize = size;
+        item->allocatedReliable = reliable;
+        item->allocatedSize = sizeIdx;
+    }
+    else
+    {
+        return nullptr;
+    }
+
+    m_numAllocated++;
+
+    sizes->numAllocated++;
+    if (sizes->numAllocated > sizes->maxNumAllocated)
+        sizes->maxNumAllocated = sizes->numAllocated;
+
+    if (reliable)
+    {
+        sizes->numReliableAllocated++;
+        if (sizes->numReliableAllocated > sizes->maxNumReliableAllocated)
+            sizes->maxNumReliableAllocated = sizes->numReliableAllocated;
+    }
+
+    return item;
+}
+
+double lastTime = 0.0; // idb
+float sRepathTime = 8.0; // idb
+const float s_streamDistThreshold = 10.0; // idb
+
+void FRDNetPeer::Tick(float timeslice)
+{
+    // --- Update timing ---
+    LARGE_INTEGER perfCount;
+    QueryPerformanceCounter(&perfCount);
+
+    double currentTime = (double)(perfCount.QuadPart - timerGameStartTime.QuadPart)
+        / (double)timerFrequency.QuadPart;
+    double dt = (float)(currentTime - lastTime);
+    lastTime = currentTime;
+
+    float f0 = (float)dt;
+
+    m_laststats.time += f0;
+
+    // --- Update stats every second ---
+    if (m_laststats.time > 1.0f)
+    {
+        float invTime = 1.0f / m_laststats.time;
+        float scale = sRepathTime;
+
+        m_stats.recvSpeed = (float)(m_stats.bytesRecv - m_laststats.bytesRecv) * invTime * scale;
+        m_stats.gameSendSpeed = (float)(m_stats.gameBytesSent - m_laststats.gameBytesSent) * invTime * scale;
+        m_stats.repeatSendSpeed = (float)(m_stats.repeatBytesSent - m_laststats.repeatBytesSent) * invTime * scale;
+        m_stats.systemSendSpeed = (float)(m_stats.systemBytesSent - m_laststats.systemBytesSent) * invTime * scale;
+        m_stats.voiceSendSpeed = (float)(m_stats.voiceBytesSent - m_laststats.voiceBytesSent) * invTime * scale;
+        m_stats.mergedPacketsSendSpeed = (float)(m_stats.mergedPacketsSent - m_laststats.mergedPacketsSent) * invTime;
+        m_stats.mergedPacketsRecvSpeed = (float)(m_stats.mergedPacketsRecv - m_laststats.mergedPacketsRecv) * invTime;
+        m_stats.totalPacketsSendSpeed = (float)(m_stats.totalPacketsSent - m_laststats.totalPacketsSent) * invTime;
+        m_stats.totalPacketsRecvSpeed = (float)(m_stats.totalPacketsRecv - m_laststats.totalPacketsRecv) * invTime;
+
+        // Update per-size packet rate stats
+        for (int i = 0; i < 8; i++)
+        {
+            m_stats.packetSizesSendCurrent[i] = m_stats.packetSizesSend[i] - m_laststats.packetSizesSend[i];
+            m_stats.packetSizesRecvCurrent[i] = m_stats.packetSizesRecv[i] - m_laststats.packetSizesRecv[i];
+            m_laststats.packetSizesSend[i] = m_stats.packetSizesSend[i];
+            m_laststats.packetSizesRecv[i] = m_stats.packetSizesRecv[i];
+        }
+
+        m_laststats.time = 0.0f;
+        m_laststats.bytesRecv = m_stats.bytesRecv;
+        m_laststats.gameBytesSent = m_stats.gameBytesSent;
+        m_laststats.repeatBytesSent = m_stats.repeatBytesSent;
+        m_laststats.systemBytesSent = m_stats.systemBytesSent;
+        m_laststats.voiceBytesSent = m_stats.voiceBytesSent;
+        m_laststats.mergedPacketsSent = m_stats.mergedPacketsSent;
+        m_laststats.mergedPacketsRecv = m_stats.mergedPacketsRecv;
+        m_laststats.totalPacketsSent = m_stats.totalPacketsSent;
+        m_laststats.totalPacketsRecv = m_stats.totalPacketsRecv;
+    }
+
+    // --- Advance timers for all active connections ---
+    for (int i = 0; i < m_maxNumPeers; i++)
+    {
+        Connection* conn = &m_connections[i];
+        bool isFree = (conn->m_connectionId.publicAddress.___u0.ip == (unsigned int)-1 &&
+            conn->m_connectionId.publicAddress.port == 0xFFFF);
+        if (isFree)
+            continue;
+
+        conn->m_timeSincePing += f0;
+        conn->m_timeSinceRecv += f0;
+        conn->m_timeSinceSendBufferSend += f0;
+        conn->m_timeSinceConnectionRequest += f0;
+
+        // Advance timers on reliable recv list
+        for (dlinkdef_s* node = conn->rchannel.recvList.head;
+            (dlinklistdef_s*)node != &conn->rchannel.recvList;
+            node = node->next)
+        {
+            PacketPoolItem* item = (PacketPoolItem*)((char*)node + conn->rchannel.recvList.offset);
+            item->timer += f0;
+        }
+
+        // Advance timers on reliable send list
+        for (dlinkdef_s* node = conn->rchannel.sendList.head;
+            (dlinklistdef_s*)node != &conn->rchannel.sendList;
+            node = node->next)
+        {
+            PacketPoolItem* item = (PacketPoolItem*)((char*)node + conn->rchannel.sendList.offset);
+            item->timer += f0;
+        }
+
+        // Advance timers on unreliable ordered channels
+        for (int ch = 0; ch < 32; ch++)
+        {
+            dlinklistdef_s* recvList = &conn->rochannel[ch].recvList;
+            for (dlinkdef_s* node = recvList->head;
+                (dlinklistdef_s*)node != recvList;
+                node = node->next)
+            {
+                PacketPoolItem* item = (PacketPoolItem*)((char*)node + recvList->offset);
+                item->timer += f0;
+            }
+
+            dlinklistdef_s* sendList = &conn->rochannel[ch].sendList;
+            for (dlinkdef_s* node = sendList->head;
+                (dlinklistdef_s*)node != sendList;
+                node = node->next)
+            {
+                PacketPoolItem* item = (PacketPoolItem*)((char*)node + sendList->offset);
+                item->timer += f0;
+            }
+        }
+    }
+
+    // --- Process received queue ---
+    RecvQueueItem qitem;
+    while (tsQueueRemove(m_recvQueue, &qitem, false))
+    {
+        Connection* conn = GetConnectionFromPrivateID(&qitem.address);
+
+        // Build PacketPoolItem from queue data
+        PacketPoolItem pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.timer = 0.0f;
+        pkt.datavalid = true;
+        pkt.data = pkt.dataArray;
+        pkt.reliability = ReliabilityMax;
+
+        memcpy(pkt.dataArray, qitem.data, qitem.dataSize);
+        ReadHeaderData(&pkt.header, &pkt.data, pkt.dataArray);
+
+        pkt.dataSize = (unsigned int)(pkt.dataArray + qitem.dataSize - pkt.data);
+
+        unsigned char pktType = *pkt.data;
+
+        bool shouldProcess = false;
+        if (conn && pkt.header.connected)
+            shouldProcess = true;
+        if (pktType == FRDNETPACKET_PING ||
+            pktType == FRDNETPACKET_PONG ||
+            pktType == FRDNETPACKET_REQUEST_GAMEINFO ||
+            pktType == FRDNETPACKET_GAMEINFO)
+            shouldProcess = true;
+
+        if (!shouldProcess)
+        {
+            // Not connected and not a special packet -- kill connection
+            if (m_server && conn)
+            {
+                PacketPoolItem* notify = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(32, true, this);
+                unsigned long long connId = *(unsigned long long*) & conn->m_connectionId.publicAddress;
+                SendRemoveRemoteConnection(conn);
+                KillConnection(conn);
+
+                if (notify)
+                {
+                    notify->data[0] = FRDNETPACKET_CONNECTION_LOST;
+                    notify->address.___u0.ip = (unsigned int)(connId);
+                    notify->address.port = (unsigned short)(connId >> 32);
+
+                    dlinkdef_s* link = &notify->link;
+                    link->prev = m_receivedList.tail;
+                    link->next = (dlinkdef_s*)&m_receivedList;
+                    m_receivedList.tail->next = link;
+                    m_receivedList.tail = link;
+                }
+            }
+        }
+        else
+        {
+            // Reset timeSincePing if valid connected packet
+            if (pktType != FRDNETPACKET_REQUEST_GAMEINFO &&
+                pktType != FRDNETPACKET_GAMEINFO &&
+                conn && pkt.header.connected)
+            {
+                conn->m_timeSinceRecv = 0.0f;
+            }
+
+            if (pkt.header.reliability == ReliabilityUnreliable &&
+                *pkt.dataArray == FRDNETPACKET_MULTIPACKET)
+            {
+                // Multi-packet: process each sub-packet
+                RemoveAcknowledge(conn, &pkt.header);
+
+                int offset = (int)(pkt.data - pkt.dataArray) + 1;
+                while (offset < (int)qitem.dataSize)
+                {
+                    // Read sub-packet size (big-endian uint16)
+                    unsigned short subSize = ((unsigned short)qitem.data[offset] << 8)
+                        | (unsigned short)qitem.data[offset + 1];
+                    offset += 2;
+
+                    PacketPoolItem sub;
+                    memset(&sub, 0, sizeof(sub));
+                    sub.datavalid = true;
+                    sub.data = sub.dataArray;
+                    sub.address = qitem.address;
+                    memcpy(sub.dataArray, &qitem.data[offset], subSize);
+                    ReadHeaderData(&sub.header, &sub.data, sub.dataArray);
+                    sub.dataSize = subSize;
+
+                    RemoveAcknowledge(conn, &sub.header);
+                    sub.reliability = sub.header.reliability;
+                    sub.channel = sub.header.channel;
+                    QueueProcessPacket(&sub);
+
+                    offset += subSize;
+                }
+            }
+            else
+            {
+                // Single packet
+                pkt.address = qitem.address;
+                RemoveAcknowledge(conn, &pkt.header);
+                pkt.reliability = pkt.header.reliability;
+                pkt.channel = pkt.header.channel;
+                QueueProcessPacket(&pkt);
+            }
+        }
+    }
+
+    // --- Per-connection tick ---
+    for (int i = 0; i < m_maxNumPeers; i++)
+    {
+        Connection* conn = &m_connections[i];
+        bool isFree = (conn->m_connectionId.publicAddress.___u0.ip == (unsigned int)-1 &&
+            conn->m_connectionId.publicAddress.port == 0xFFFF);
+        if (isFree)
+            continue;
+
+        // Connection attempt timeout
+        if (!conn->m_accepted && conn->m_timeSinceConnectionRequest > 0.3f)
+            ConnectionFailed(&conn->m_connectionId.privateAddress);
+
+        // Send address info if needed
+        if (conn->m_sendingPrivateAddress)
+            SendThisIsMyAddress(conn);
+
+        // Ping if needed
+        if (conn->m_timeSincePing > 1.0f)
+        {
+            if (conn->m_timeSinceRecv > 0.25f)
+            {
+                // Log timeout warning
+            }
+
+            if (m_lookingforserver)
+                LookingForServerPing(conn);
+            else
+                Ping(&conn->m_connectionId);
+
+            conn->m_timeSincePing = 0.0f;
+        }
+
+        // Connection lost timeout
+        if (conn->m_timeSinceRecv >= s_streamDistThreshold &&
+            !m_ignoreLostConnection &&
+            (conn->m_type == ConnectionTypeClientServer || m_lookingforserver))
+        {
+            PacketPoolItem* notify = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(32, true, this);
+            unsigned long long connId = *(unsigned long long*) & conn->m_connectionId.publicAddress;
+            SendRemoveRemoteConnection(conn);
+            KillConnection(conn);
+
+            if (m_allowServerMigration)
+            {
+                if (notify)
+                {
+                    notify->data[0] = FRDNETPACKET_CONNECTION_LOST;
+                    // Queue lost connection notification
+                    dlinkdef_s* link = &notify->link;
+                    link->prev = m_receivedList.tail;
+                    link->next = (dlinkdef_s*)&m_receivedList;
+                    m_receivedList.tail->next = link;
+                    m_receivedList.tail = link;
+                }
+                if (!m_server)
+                    m_lookingforserver = true;
+            }
+            else if (notify)
+            {
+                notify->data[0] = m_server ? FRDNETPACKET_CONNECTION_LOST
+                    : FRDNETPACKET_LOST_SERVER_CONNECTION;
+                dlinkdef_s* link = &notify->link;
+                link->prev = m_receivedList.tail;
+                link->next = (dlinkdef_s*)&m_receivedList;
+                m_receivedList.tail->next = link;
+                m_receivedList.tail = link;
+            }
+            continue;
+        }
+
+        // Process reliable send list -- resend timed out packets
+        {
+            dlinklistdef_s* sendList = &conn->rchannel.sendList;
+            for (dlinkdef_s* node = sendList->head;
+                (dlinklistdef_s*)node != sendList; )
+            {
+                dlinkdef_s* next = node->next;
+                PacketPoolItem* item = (PacketPoolItem*)((char*)node + sendList->offset);
+
+                unsigned short diff = (item->header.count.count - conn->rchannel.recvCounter.count) & 0x3FF;
+                if (diff >= 0x200)
+                {
+                    if (!item->resendrequested || item->timer > 5.0f)
+                    {
+                        // Unlink and free
+                        node->next->prev = node->prev;
+                        node->prev->next = node->next;
+                        node->next = node;
+                        node->prev = node;
+
+                        FRDPeerHandler::s_peerHandler->m_numAllocated--;
+                        FRDPeerHandler::PacketSizes* sz = &FRDPeerHandler::s_peerHandler->m_sizes[item->allocatedSize];
+                        sz->numAllocated--;
+                        if (item->allocatedReliable)
+                            sz->numReliableAllocated--;
+
+                        *(void**)item = FRDPeerHandler::s_peerHandler->m_packetPool.m_poolae.state.free;
+                        FRDPeerHandler::s_peerHandler->m_packetPool.m_poolae.state.free = (poolObject*)item;
+                        FRDPeerHandler::s_peerHandler->m_packetPool.m_poolae.state.freeCount++;
+                    }
+                }
+                else if (!item->resendrequested && item->timer > radius)
+                {
+                    // Resend request
+                    EngineNetDataStream ws;
+                    unsigned char writeBuf[256];
+                    ws.m_read = false;
+                    ws.m_data = writeBuf;
+                    ws.m_databitsize = 256 * 8;
+                    ws.m_bytenum = 1;
+                    ws.m_bitnum = 0;
+                    writeBuf[0] = FRDNETPACKET_REQUESTRESEND;
+
+                    Serialise(&ws, &item->header.reliability,
+                        &item->header.count,
+                        &item->header.channel);
+
+                    int writeSize = ws.m_bytenum + (ws.m_bitnum ? 1 : 0);
+
+                    Connection* srcConn = GetConnectionFromPrivateID(&conn->m_connectionId.privateAddress);
+
+                    PacketPoolItem pkt;
+                    memset(&pkt, 0, sizeof(pkt));
+                    pkt.timer = 0.0f;
+                    pkt.datavalid = true;
+                    pkt.data = pkt.dataArray;
+                    pkt.reliability = ReliabilityMax;
+                    pkt.dataSize = writeSize;
+                    pkt.header.reliability = ReliabilityUnreliable;
+                    pkt.header.connected = (srcConn != nullptr);
+                    pkt.address = conn->m_connectionId.privateAddress;
+
+                    WriteHeaderData(&pkt.header, &pkt.data, pkt.dataArray);
+                    memcpy(pkt.data, writeBuf, writeSize);
+                    AddToSendBuffer(&pkt, false);
+
+                    m_stats.totalPacketsSent++;
+                    m_stats.systemBytesSent += writeSize;
+
+                    item->timer = 0.0f;
+                    item->resendrequested = true;
+                }
+
+                node = next;
+            }
+        }
+
+        // Process unreliable ordered send lists
+        for (int ch = 0; ch < 32; ch++)
+        {
+            dlinklistdef_s* sendList = &conn->rochannel[ch].sendList;
+            for (dlinkdef_s* node = sendList->head;
+                (dlinklistdef_s*)node != sendList; )
+            {
+                dlinkdef_s* next = node->next;
+                PacketPoolItem* item = (PacketPoolItem*)((char*)node + sendList->offset);
+
+                unsigned short diff = (item->header.count.count - conn->rochannel[ch].recvCounter.count) & 0x3FF;
+                if (diff >= 0x200)
+                {
+                    if (!item->resendrequested || item->timer > 5.0f)
+                    {
+                        node->next->prev = node->prev;
+                        node->prev->next = node->next;
+                        node->next = node;
+                        node->prev = node;
+
+                        FRDPeerHandler::s_peerHandler->m_numAllocated--;
+                        FRDPeerHandler::PacketSizes* sz = &FRDPeerHandler::s_peerHandler->m_sizes[item->allocatedSize];
+                        sz->numAllocated--;
+                        if (item->allocatedReliable)
+                            sz->numReliableAllocated--;
+
+                        *(void**)item = FRDPeerHandler::s_peerHandler->m_packetPool.m_poolae.state.free;
+                        FRDPeerHandler::s_peerHandler->m_packetPool.m_poolae.state.free = (poolObject*)item;
+                        FRDPeerHandler::s_peerHandler->m_packetPool.m_poolae.state.freeCount++;
+                    }
+                }
+                else if (!item->resendrequested && item->timer > radius)
+                {
+                    EngineNetDataStream ws;
+                    unsigned char writeBuf[256];
+                    ws.m_read = false;
+                    ws.m_data = writeBuf;
+                    ws.m_databitsize = 256 * 8;
+                    ws.m_bytenum = 1;
+                    ws.m_bitnum = 0;
+                    writeBuf[0] = FRDNETPACKET_REQUESTRESEND;
+
+                    Serialise(&ws, &item->header.reliability,
+                        &item->header.count,
+                        &item->header.channel);
+
+                    int writeSize = ws.m_bytenum + (ws.m_bitnum ? 1 : 0);
+
+                    Connection* srcConn = GetConnectionFromPrivateID(&conn->m_connectionId.privateAddress);
+
+                    PacketPoolItem pkt;
+                    memset(&pkt, 0, sizeof(pkt));
+                    pkt.timer = 0.0f;
+                    pkt.datavalid = true;
+                    pkt.data = pkt.dataArray;
+                    pkt.reliability = ReliabilityMax;
+                    pkt.dataSize = writeSize;
+                    pkt.header.reliability = ReliabilityUnreliable;
+                    pkt.header.connected = (srcConn != nullptr);
+                    pkt.address = conn->m_connectionId.privateAddress;
+
+                    WriteHeaderData(&pkt.header, &pkt.data, pkt.dataArray);
+                    memcpy(pkt.data, writeBuf, writeSize);
+                    AddToSendBuffer(&pkt, false);
+
+                    m_stats.totalPacketsSent++;
+                    m_stats.systemBytesSent += writeSize;
+
+                    item->timer = 0.0f;
+                    item->resendrequested = true;
+                }
+
+                node = next;
+            }
+        }
+
+        // Send ack-only packet if needed
+        if (conn->m_timeSinceSendBufferSend > 0.05f)
+        {
+            if (!conn->m_sendBufferSize)
+            {
+                unsigned char ackData[1] = { 0 };
+                Connection* srcConn = GetConnectionFromPrivateID(&conn->m_connectionId.privateAddress);
+
+                PacketPoolItem pkt;
+                memset(&pkt, 0, sizeof(pkt));
+                pkt.timer = 0.0f;
+                pkt.datavalid = true;
+                pkt.data = pkt.dataArray;
+                pkt.reliability = ReliabilityMax;
+                pkt.dataSize = 1;
+                pkt.header.reliability = ReliabilityUnreliable;
+                pkt.header.connected = (srcConn != nullptr);
+                pkt.address = conn->m_connectionId.privateAddress;
+
+                WriteHeaderData(&pkt.header, &pkt.data, pkt.dataArray);
+                memcpy(pkt.data, ackData, 1);
+                AddToSendBuffer(&pkt, false);
+
+                m_stats.totalPacketsSent++;
+                m_stats.systemBytesSent += 1;
+            }
+
+            if (conn->m_sendBufferSize > 0)
+                SendSendBuffer(conn);
+        }
+    }
+
+    // --- Looking for server ---
+    if (m_lookingforserver)
+    {
+        // Check if all connection slots are free
+        bool allFree = true;
+        for (int i = 0; i < m_maxNumPeers; i++)
+        {
+            Connection* conn = &m_connections[i];
+            if (conn->m_connectionId.publicAddress.___u0.ip != (unsigned int)-1 ||
+                conn->m_connectionId.publicAddress.port != 0xFFFF)
+            {
+                allFree = false;
+                break;
+            }
+        }
+
+        if (allFree)
+        {
+            // Send I_AM_SERVER broadcast
+            PacketPoolItem pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.timer = 0.0f;
+            pkt.datavalid = true;
+            pkt.data = pkt.dataArray;
+            pkt.reliability = ReliabilityMax;
+            pkt.address.___u0.ip = (unsigned int)-1;
+            pkt.address.port = (unsigned short)-1;
+            pkt.dataSize = 1;
+            pkt.dataArray[0] = FRDNETPACKET_I_AM_SERVER;
+            ProcessPacket(&pkt);
+        }
+    }
+
+    // --- Copy connections to their target slots ---
+    for (int i = 0; i < m_maxNumPeers; i++)
+    {
+        Connection* conn = &m_connections[i];
+        bool isFree = (conn->m_connectionId.publicAddress.___u0.ip == (unsigned int)-1 &&
+            conn->m_connectionId.publicAddress.port == 0xFFFF);
+        if (isFree)
+            continue;
+
+        int copyTo = conn->m_copyToIndex;
+        if (copyTo >= 0 && copyTo != i)
+        {
+            CopyConnection(&m_connections[copyTo], conn);
+            m_connections[copyTo].m_copyToIndex = -1;
+
+            // Invalidate source slot
+            conn->m_connectionId.privateAddress.___u0.ip = (unsigned int)-1;
+            conn->m_connectionId.privateAddress.port = 0xFFFF;
+            conn->m_connectionId.publicAddress.___u0.ip = (unsigned int)-1;
+            conn->m_connectionId.publicAddress.port = 0xFFFF;
+            conn->m_copyToIndex = -1;
+        }
+    }
+}
+
+void FRDNetPeer::SendRemoveRemoteConnection(Connection* connectionin)
+{
+    if (!m_server)
+        return;
+
+    // Build the REMOVE_REMOTE_CONNECTION packet data
+    EngineNetDataStream ws;
+    unsigned char writeBuf[256];
+    ws.m_read = false;
+    ws.m_data = writeBuf;
+    ws.m_databitsize = 512;
+    ws.m_bytenum = 1;
+    ws.m_bitnum = 0;
+    writeBuf[0] = FRDNETPACKET_REMOVE_REMOTE_CONNECTION;
+
+    // Serialise the connection ID of the connection being removed
+    connectionin->m_connectionId.Serialise(&ws);
+
+    int dataSize = ws.m_bytenum + (ws.m_bitnum ? 1 : 0);
+
+    // Send to all other active connections
+    for (int i = 0; i < m_maxNumPeers; i++)
+    {
+        Connection* conn = &m_connections[i];
+
+        bool isFree = (conn->m_connectionId.publicAddress.___u0.ip == (unsigned int)-1 &&
+            conn->m_connectionId.publicAddress.port == 0xFFFF);
+        if (isFree || conn == connectionin)
+            continue;
+
+        Connection* srcConn = GetConnectionFromPrivateID(
+            &conn->m_connectionId.privateAddress);
+
+        // Build packet
+        PacketPoolItem pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.timer = 0.0f;
+        pkt.datavalid = true;
+        pkt.data = pkt.dataArray;
+        pkt.reliability = ReliabilityMax;
+        pkt.dataSize = dataSize;
+        pkt.header.reliability = ReliabilityReliableOrdered;
+        pkt.header.channel = 0;
+        pkt.header.connected = (srcConn != nullptr);
+        pkt.address = conn->m_connectionId.privateAddress;
+
+        if (srcConn)
+        {
+            // Assign ordered sequence number
+            pkt.header.count.count = srcConn->rochannel[0].sendCounter.count;
+            srcConn->rochannel[0].sendCounter.count =
+                (srcConn->rochannel[0].sendCounter.count + 1) & 0x3FF;
+        }
+
+        WriteHeaderData(&pkt.header, &pkt.data, pkt.dataArray);
+        memcpy(pkt.data, ws.m_data, dataSize);
+
+        // Allocate reliable packet and insert into send list
+        if (srcConn)
+        {
+            int totalSize = (int)(pkt.data - pkt.dataArray) + dataSize;
+            PacketPoolItem* reliable = FRDPeerHandler:: s_peerHandler->AllocPacketPoolItem(
+                totalSize, true, this);
+
+            if (reliable)
+            {
+                int  savedAllocSize = reliable->allocatedSize;
+                bool savedAllocRel = reliable->allocatedReliable;
+                memcpy(reliable, &pkt, 0x530);
+                reliable->allocatedSize = savedAllocSize;
+                reliable->allocatedReliable = savedAllocRel;
+                reliable->data = &pkt.data[(char*)reliable - (char*)pkt.dataArray + 0x40];
+
+                dlinkdef_s* link = &reliable->link;
+                link->prev = srcConn->rochannel[0].sendList.tail;
+                link->next = (dlinkdef_s*)&srcConn->rochannel[0].sendList;
+                srcConn->rochannel[0].sendList.tail->next = link;
+                srcConn->rochannel[0].sendList.tail = link;
+            }
+        }
+
+        AddToSendBuffer(&pkt, false);
+
+        m_stats.totalPacketsSent++;
+        m_stats.systemBytesSent += (unsigned int)(pkt.data - pkt.dataArray) + dataSize;
+    }
+}
+
+void ConnectionID::Serialise(EngineNetDataStream* stream)
+{
+    unsigned char natBuf[1];
+
+    if (stream->m_read)
+    {
+        stream->Serialise(natBuf, 0, 2);
+        nat = (FRDNATType)natBuf[0];
+    }
+    else
+    {
+        natBuf[0] = (unsigned char)nat;
+        stream->Serialise(natBuf, 0, 2);
+    }
+
+    publicAddress.Serialise(stream);
+}
+
+//May not work with XBL connections
+void AddressID::Serialise(EngineNetDataStream* stream)
+{
+    if (!stream->m_read)
+    {
+        // Writing
+        if (FRDPeerHandler::s_peerHandler->m_socket.protocol != FRDSocket::PROTOCOL_UDP &&
+            ___u0.ip != 0 && ___u0.ip != (unsigned int)-1)
+        {
+            // VDP/online path -- use XNet address conversion (Xbox 360 only)
+            // On PC we skip the XNet calls and just write false for hasXnAddr
+            bool hasXnAddr = false;
+            stream->Serialise(&hasXnAddr);
+
+            // Fallthrough to plain IP path
+            for (int i = 0; i < 4; i++)
+                stream->Serialise(&___u0.ip_inBytes[i], 0, 0xFF);
+            stream->Serialise(&port, (unsigned short)0, (unsigned short)0xFFFF);
+        }
+        else
+        {
+            // Plain UDP path
+            bool hasXnAddr = false;
+            stream->Serialise(&hasXnAddr);
+
+            for (int i = 0; i < 4; i++)
+                stream->Serialise(&___u0.ip_inBytes[i], 0, 0xFF);
+            stream->Serialise(&port, (unsigned short)0, (unsigned short)0xFFFF);
+        }
+    }
+    else
+    {
+        // Reading
+        bool hasXnAddr = false;
+        stream->Serialise(&hasXnAddr);
+
+        if (!hasXnAddr)
+        {
+            // Plain IP
+            ___u0.ip = 0;
+            for (int i = 0; i < 4; i++)
+                stream->Serialise(&___u0.ip_inBytes[i], 0, 0xFF);
+            stream->Serialise(&port, (unsigned short)0, (unsigned short)0xFFFF);
+        }
+        else
+        {
+            // XNet path (Xbox 360 only) -- on PC just read and discard the XnAddr
+            // then read port
+            unsigned char xnAddr[0x24];
+            unsigned char xnkid[8];
+            stream->SerialiseBuffer((char*)xnAddr, 0x24);
+            stream->SerialiseBuffer((char*)xnkid, 8);
+            stream->Serialise(&port, (unsigned short)0, (unsigned short)0xFFFF);
+
+            // On PC we can't convert XnAddr back to IP -- zero it out
+            ___u0.ip = 0;
+        }
+    }
+}
+
+void FRDNetPeer::RemoveAcknowledge(Connection* connection, PacketHeader* header)
+{
+    if (!connection)
+        return;
+    if (!header->ackincluded)
+        return;
+
+    PacketReliability ackRel = header->ackreliability;
+    if (ackRel != ReliabilityReliable && ackRel != ReliabilityReliableOrdered)
+        return;
+
+    if (header->acksend)
+    {
+        // Sender is acknowledging received packets -- fill in missing recv slots
+        if (ackRel == ReliabilityReliable)
+        {
+            dlinklistdef_s* recvList = &connection->rchannel.recvList;
+
+            // Determine expected count
+            unsigned short expectedCount = connection->rchannel.recvCounter.count;
+            if ((dlinklistdef_s*)recvList->tail != recvList)
+            {
+                PacketPoolItem* tail = (PacketPoolItem*)((char*)recvList->tail + recvList->offset);
+                unsigned short nextCount = (tail->header.count.count + 1) & 0x3FF;
+                if (((nextCount - connection->rchannel.recvCounter.count) & 0x3FF) < 0x200)
+                    expectedCount = nextCount;
+            }
+
+            // Fill missing slots up to ackcount
+            while (((expectedCount - header->ackcount.count) & 0x3FF) >= 0x200)
+            {
+                PacketPoolItem* placeholder = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(1264, true, this);
+                if (placeholder)
+                {
+                    placeholder->header.reliability = ReliabilityReliable;
+                    placeholder->header.count.count = expectedCount;
+                    placeholder->datavalid = false;
+
+                    dlinkdef_s* link = &placeholder->link;
+                    link->prev = recvList->tail;
+                    link->next = (dlinkdef_s*)recvList;
+                    recvList->tail->next = link;
+                    recvList->tail = link;
+                }
+                expectedCount = (expectedCount + 1) & 0x3FF;
+            }
+        }
+        else // ReliabilityReliableOrdered
+        {
+            int ch = header->ackchannel;
+            dlinklistdef_s* recvList = &connection->rochannel[ch].recvList;
+
+            unsigned short expectedCount = connection->rochannel[ch].recvCounter.count;
+            if ((dlinklistdef_s*)recvList->tail != recvList)
+            {
+                PacketPoolItem* tail = (PacketPoolItem*)((char*)recvList->tail + recvList->offset);
+                unsigned short nextCount = (tail->header.count.count + 1) & 0x3FF;
+                if (((nextCount - connection->rochannel[ch].recvCounter.count) & 0x3FF) < 0x200)
+                    expectedCount = nextCount;
+            }
+
+            while (((expectedCount - header->ackcount.count) & 0x3FF) >= 0x200)
+            {
+                PacketPoolItem* placeholder = FRDPeerHandler::s_peerHandler->AllocPacketPoolItem(1264, true, this);
+                if (placeholder)
+                {
+                    placeholder->header.reliability = ReliabilityReliableOrdered;
+                    placeholder->header.channel = (unsigned short)ch;
+                    placeholder->header.count.count = expectedCount;
+                    placeholder->datavalid = false;
+
+                    dlinkdef_s* link = &placeholder->link;
+                    link->prev = recvList->tail;
+                    link->next = (dlinkdef_s*)recvList;
+                    recvList->tail->next = link;
+                    recvList->tail = link;
+                }
+                expectedCount = (expectedCount + 1) & 0x3FF;
+            }
+        }
+    }
+    else
+    {
+        // Receiver acknowledging sent packets -- free acknowledged items from send list
+        if (ackRel == ReliabilityReliable)
+        {
+            dlinklistdef_s* sendList = &connection->rchannel.sendList;
+            dlinkdef_s* node = sendList->head;
+
+            while ((dlinklistdef_s*)node != sendList)
+            {
+                dlinkdef_s* next = node->next;
+                PacketPoolItem* item = (PacketPoolItem*)((char*)node + sendList->offset);
+
+                if (((item->header.count.count - header->ackcount.count) & 0x3FF) >= 0x200)
+                {
+                    // Unlink and free
+                    node->next->prev = node->prev;
+                    node->prev->next = node->next;
+                    node->next = node;
+                    node->prev = node;
+                    FRDPeerHandler::s_peerHandler->FreePacketPoolItem(item);
+                }
+
+                node = next;
+            }
+        }
+        else // ReliabilityReliableOrdered
+        {
+            int ch = header->ackchannel;
+            dlinklistdef_s* sendList = &connection->rochannel[ch].sendList;
+            dlinkdef_s* node = sendList->head;
+
+            while ((dlinklistdef_s*)node != sendList)
+            {
+                dlinkdef_s* next = node->next;
+                PacketPoolItem* item = (PacketPoolItem*)((char*)node + sendList->offset);
+
+                if (((item->header.count.count - header->ackcount.count) & 0x3FF) >= 0x200)
+                {
+                    node->next->prev = node->prev;
+                    node->prev->next = node->next;
+                    node->next = node;
+                    node->prev = node;
+                    FRDPeerHandler::s_peerHandler->FreePacketPoolItem(item);
+                }
+
+                node = next;
+            }
+        }
+    }
+}
+
+void __fastcall FRDNetPeer::ConnectionFailed(AddressID* id)
+{
+    STUB_STATIC();
+}
+
+void __fastcall FRDNetPeer::SendThisIsMyAddress(Connection* connection)
+{
+    STUB_STATIC();
+}
+
+void __fastcall FRDNetPeer::LookingForServerPing(Connection* connection)
+{
+    STUB_STATIC();
+}
+
+void __fastcall FRDNetPeer::Ping(ConnectionID* id)
+{
+    STUB_STATIC();
 }
 
 FRDPeerHandler* FRDPeerHandler::s_peerHandler = nullptr;

@@ -29,6 +29,7 @@
 
 struct HOM;
 
+FRDNetPeer* ServerPeer = nullptr;
 
 typedef void (*EngineWorldFunc)();
 
@@ -1440,6 +1441,11 @@ int engineTickWorld()
         } while (now < deadline);
     }
 
+    //ServerTest
+    if (ServerPeer)
+    {
+        ServerPeer->Tick(engineframe);
+    }
     ++engineframe;
 
     return 1;
@@ -1953,7 +1959,7 @@ void frdmain(int argc, char** argv)
         }
     }
 }
-#define DedicatedServer
+//#define DedicatedServer
 
 int main()
 {
@@ -1997,8 +2003,8 @@ int main()
     //Dedicated server
     FRDPeerHandler::s_peerHandler = new FRDPeerHandler();
     FRDSockets::m_instance = new FRDSockets();
-    auto handle = new FRDNetPeer();
-    handle->Initialize(0, 4, 60004, true, true, true, false);
+    ServerPeer = new FRDNetPeer();
+    ServerPeer->Initialize(0, 4, 60004, true, true, true, false);
     //Default Packet F0 0D 00 00 00 00 00
 #endif // DEBUG
     frdmain(processedArgc, argv);
